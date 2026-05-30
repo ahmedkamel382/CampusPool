@@ -3,7 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import 'package:provider/provider.dart'; // NEW
+import 'package:provider/provider.dart';
 import '../providers/user_provider.dart';
 
 import '../constants/app_locations.dart';
@@ -561,6 +561,10 @@ class _HomeScreenState extends State<HomeScreen> {
     final bool hasSearch = _activeFilters != null;
 
     final userData = context.watch<UserProvider>().userData ?? {};
+
+    final String fullName = userData['fullName']?.toString() ?? 'Student';
+    final String firstName = fullName.split(' ').first;
+
     final bool realTimeHasCar = userData['hasCar'] ?? false;
 
     return Scaffold(
@@ -580,9 +584,9 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
-                  'Available Rides',
-                  style: TextStyle(
+                Text(
+                  'Welcome, $firstName',
+                  style: const TextStyle(
                     color: AppColors.white,
                     fontSize: 22,
                     fontWeight: FontWeight.bold,
