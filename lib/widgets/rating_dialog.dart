@@ -155,7 +155,7 @@ class _RatingDialogState extends State<RatingDialog> {
             return GestureDetector(
               onTap: () => setState(() => _selectedStars = star),
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 4),
                 child: AnimatedScale(
                   scale: _selectedStars >= star ? 1.15 : 1.0,
                   duration: const Duration(milliseconds: 150),
@@ -164,7 +164,7 @@ class _RatingDialogState extends State<RatingDialog> {
                     color: _selectedStars >= star
                         ? AppColors.gold
                         : const Color(0xFFCBD5E1),
-                    size: 44,
+                    size: 36,
                   ),
                 ),
               ),

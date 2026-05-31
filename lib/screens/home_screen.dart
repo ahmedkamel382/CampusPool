@@ -33,35 +33,48 @@ class _HomeScreenState extends State<HomeScreen> {
 
   LatLng? _currentUserHomeLocation;
   String? _currentUserDefaultNeighborhood;
-  // ignore: unused_field
-  bool _hasCar = false;
 
   RideDirectionFilter _selectedDirection = RideDirectionFilter.toCollege;
 
-  // --- APP UPDATE: Pagination Memory ---
-  final ScrollController _scrollController = ScrollController();
-  int _currentLimit = 10;
+  late Stream<QuerySnapshot<Map<String, dynamic>>> _ridesStream;
+
+  static const int _feedLimit = 50;
 
   @override
   void initState() {
     super.initState();
+    _ridesStream = _createRideStream();
     _fetchCurrentUserLocation();
-    _scrollController.addListener(_onScroll); // Listen to bottom hits
   }
 
-  @override
-  void dispose() {
-    _scrollController.dispose(); // <-- STRICT GARBAGE COLLECTION
-    super.dispose();
-  }
-
-  void _onScroll() {
-    if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 200) {
-      // User is nearing the bottom. Increase limit to fetch next batch.
-      setState(() {
-        _currentLimit += 10;
-      });
+  Stream<QuerySnapshot<Map<String, dynamic>>> _createRideStream() {
+    if (_activeFilters == null) {
+      return RideService().streamActiveRides(limit: _feedLimit);
     }
+
+    final String searchedCampus =
+        _activeFilters!['selectedCampus']?.toString() ?? '';
+
+    final String searchedNeighborhood =
+        _activeFilters!['selectedNeighborhood']?.toString() ?? '';
+
+    if (_selectedDirection == RideDirectionFilter.toHome) {
+      return RideService().streamActiveRides(
+        originFilter: searchedCampus,
+        destinationFilter: searchedNeighborhood,
+        limit: _feedLimit,
+      );
+    }
+
+    return RideService().streamActiveRides(
+      originFilter: searchedNeighborhood,
+      destinationFilter: searchedCampus,
+      limit: _feedLimit,
+    );
+  }
+
+  void _refreshRideStream() {
+    _ridesStream = _createRideStream();
   }
 
   Future<void> _fetchCurrentUserLocation() async {
@@ -88,42 +101,15 @@ class _HomeScreenState extends State<HomeScreen> {
           ? AppLocations.neighborhoodCoordinates[defaultNeighborhood]
           : null;
 
-      final bool userHasCar = data['hasCar'] ?? false;
-
       if (!mounted) return;
 
       setState(() {
         _currentUserHomeLocation =
             savedHomeLocation ?? fallbackNeighborhoodLocation;
         _currentUserDefaultNeighborhood = defaultNeighborhood;
-        _hasCar = userHasCar;
       });
     } catch (_) {
       // Sorting can still work by time if user location cannot be loaded.
-    }
-  }
-
-  // --- NEW: Optimized Server-Side Stream ---
-  Stream<QuerySnapshot<Map<String, dynamic>>> _getOptimizedRideStream() {
-    if (_activeFilters == null) {
-      return RideService().streamActiveRides(limit: _currentLimit); // Passes limit to service
-    }
-
-    final String searchedCampus = _activeFilters!['selectedCampus']?.toString() ?? '';
-    final String searchedNeighborhood = _activeFilters!['selectedNeighborhood']?.toString() ?? '';
-
-    if (_selectedDirection == RideDirectionFilter.toHome) {
-      return RideService().streamActiveRides(
-        originFilter: searchedCampus,
-        destinationFilter: searchedNeighborhood,
-        limit: _currentLimit,
-      );
-    } else {
-      return RideService().streamActiveRides(
-        originFilter: searchedNeighborhood,
-        destinationFilter: searchedCampus,
-        limit: _currentLimit,
-      );
     }
   }
 
@@ -141,7 +127,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       _activeFilters = result;
-      _currentLimit = 10; // Reset limit on new search
 
       _selectedDirection = isLeavingCampus
           ? RideDirectionFilter.toHome
@@ -158,6 +143,8 @@ class _HomeScreenState extends State<HomeScreen> {
       } else {
         _customPickupName = null;
       }
+
+      _refreshRideStream();
     });
 
     if (mounted) {
@@ -197,11 +184,16 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _clearSearchFilters() {
+    final bool hadSearch = _activeFilters != null;
+
     setState(() {
       _activeFilters = null;
       _customPickupLocation = null;
       _customPickupName = null;
-      _currentLimit = 10;
+
+      if (hadSearch) {
+        _refreshRideStream();
+      }
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -215,12 +207,17 @@ class _HomeScreenState extends State<HomeScreen> {
   void _changeDirection(RideDirectionFilter direction) {
     if (_selectedDirection == direction) return;
 
+    final bool hadSearch = _activeFilters != null;
+
     setState(() {
       _selectedDirection = direction;
       _activeFilters = null;
       _customPickupLocation = null;
       _customPickupName = null;
-      _currentLimit = 10;
+
+      if (hadSearch) {
+        _refreshRideStream();
+      }
     });
   }
 
@@ -610,7 +607,9 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
+
           const SizedBox(height: 24),
+
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24.0),
             child: Row(
@@ -661,8 +660,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                 ),
-
-                // --- THE FIX: Only render the button and spacing if they have a car ---
                 if (realTimeHasCar) ...[
                   const SizedBox(width: 12),
                   InkWell(
@@ -685,7 +682,9 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
+
           const SizedBox(height: 28),
+
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24.0),
             child: Row(
@@ -704,13 +703,15 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
+
           const SizedBox(height: 16),
+
           Expanded(
             child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-              // --- APP UPDATE: Utilizing optimized server-side stream here ---
-              stream: _getOptimizedRideStream(),
+              stream: _ridesStream,
               builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
+                if (snapshot.connectionState == ConnectionState.waiting &&
+                    !snapshot.hasData) {
                   return const Center(
                     child: CircularProgressIndicator(color: AppColors.navy),
                   );
@@ -729,10 +730,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 final rides = _smartFilterAndSort(docs);
 
                 if (rides.isEmpty) {
-                  return Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24.0),
-                      child: Text(
+                  return ListView(
+                    key: ValueKey(
+                      'empty_${_selectedDirection.name}_${hasSearch.toString()}',
+                    ),
+                    physics: const AlwaysScrollableScrollPhysics(
+                      parent: BouncingScrollPhysics(),
+                    ),
+                    padding: const EdgeInsets.all(24.0),
+                    children: [
+                      const SizedBox(height: 120),
+                      Text(
                         hasSearch
                             ? 'No rides match your search criteria.'
                             : _selectedDirection ==
@@ -745,13 +753,23 @@ class _HomeScreenState extends State<HomeScreen> {
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                    ),
+                    ],
                   );
                 }
 
                 return ListView.separated(
-                  controller: _scrollController, // <-- Assign controller here for pagination detection
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                  key: ValueKey(
+                    'rides_${_selectedDirection.name}_${hasSearch.toString()}',
+                  ),
+                  physics: const AlwaysScrollableScrollPhysics(
+                    parent: BouncingScrollPhysics(),
+                  ),
+                  keyboardDismissBehavior:
+                  ScrollViewKeyboardDismissBehavior.onDrag,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 8,
+                  ),
                   itemCount: rides.length,
                   separatorBuilder: (_, __) => const SizedBox(height: 14),
                   itemBuilder: (context, index) {
@@ -847,14 +865,16 @@ class _RideFeedCard extends StatelessWidget {
 
     if (value is Timestamp) {
       final dateTime = value.toDate();
-      final month = dateTime.month;
-      final day = dateTime.day;
+
+      final String day = dateTime.day.toString().padLeft(2, '0');
+      final String month = dateTime.month.toString().padLeft(2, '0');
+
       final hour = dateTime.hour;
       final minute = dateTime.minute.toString().padLeft(2, '0');
       final period = hour >= 12 ? 'PM' : 'AM';
       final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
 
-      return '$month/$day • $displayHour:$minute $period';
+      return '$day/$month • $displayHour:$minute $period';
     }
 
     return value.toString();
@@ -863,11 +883,23 @@ class _RideFeedCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final String? currentUid = FirebaseAuth.instance.currentUser?.uid;
-    final List<String> passengerIds = (rideData[RideService.fieldPassengerIds] as List<dynamic>?)
-        ?.map((e) => e.toString()).toList() ?? []; // .toList() added for safety
-    final bool isAlreadyBooked = currentUid != null && passengerIds.contains(currentUid);
-    final String driverId = _safeText(rideData[RideService.fieldDriverId], '');
+
+    final List<String> passengerIds =
+        (rideData[RideService.fieldPassengerIds] as List<dynamic>?)
+            ?.map((e) => e.toString())
+            .toList() ??
+            [];
+
+    final bool isAlreadyBooked =
+        currentUid != null && passengerIds.contains(currentUid);
+
+    final String driverId = _safeText(
+      rideData[RideService.fieldDriverId],
+      '',
+    );
+
     final bool isMyRide = currentUid != null && driverId == currentUid;
+
     final String driverName = _safeText(
       rideData[RideService.fieldDriverName],
       'Driver',
@@ -925,7 +957,7 @@ class _RideFeedCard extends StatelessWidget {
           border: Border.all(color: const Color(0xFFF0F2F5)),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha:0.04),
+              color: Colors.black.withValues(alpha: 0.04),
               blurRadius: 10,
               offset: const Offset(0, 4),
             ),
@@ -941,13 +973,15 @@ class _RideFeedCard extends StatelessWidget {
                 color: AppColors.bgLight,
                 shape: BoxShape.circle,
               ),
-              // --- APP UPDATE: CachedNetworkImage eliminates list stuttering ---
               child: driverImageUrl.isNotEmpty
                   ? CachedNetworkImage(
                 imageUrl: driverImageUrl,
                 fit: BoxFit.cover,
                 placeholder: (context, url) => const Center(
-                  child: CircularProgressIndicator(color: AppColors.gold, strokeWidth: 2),
+                  child: CircularProgressIndicator(
+                    color: AppColors.gold,
+                    strokeWidth: 2,
+                  ),
                 ),
                 errorWidget: (context, url, error) => const Icon(
                   Icons.person,
@@ -961,7 +995,9 @@ class _RideFeedCard extends StatelessWidget {
                 size: 34,
               ),
             ),
+
             const SizedBox(width: 14),
+
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -976,7 +1012,9 @@ class _RideFeedCard extends StatelessWidget {
                       fontSize: 16,
                     ),
                   ),
+
                   const SizedBox(height: 5),
+
                   Text(
                     'Driver: $driverName',
                     maxLines: 1,
@@ -986,7 +1024,9 @@ class _RideFeedCard extends StatelessWidget {
                       fontSize: 13,
                     ),
                   ),
+
                   const SizedBox(height: 5),
+
                   Text(
                     '$earliestDeparture - $latestDeparture',
                     style: const TextStyle(
@@ -994,7 +1034,9 @@ class _RideFeedCard extends StatelessWidget {
                       fontSize: 12,
                     ),
                   ),
+
                   const SizedBox(height: 5),
+
                   Text(
                     '$availableSeats/$totalSeats seats available',
                     style: const TextStyle(
@@ -1007,31 +1049,67 @@ class _RideFeedCard extends StatelessWidget {
                   if (isAlreadyBooked)
                     Container(
                       margin: const EdgeInsets.only(top: 8),
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(color: Colors.green.withValues(alpha:0.1), borderRadius: BorderRadius.circular(6)),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.green.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
                       child: const Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.check_circle, size: 12, color: Colors.green),
+                          Icon(
+                            Icons.check_circle,
+                            size: 12,
+                            color: Colors.green,
+                          ),
                           SizedBox(width: 4),
-                          Text('Already Booked', style: TextStyle(color: Colors.green, fontSize: 10, fontWeight: FontWeight.bold)),
+                          Text(
+                            'Already Booked',
+                            style: TextStyle(
+                              color: Colors.green,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
                         ],
                       ),
                     ),
+
                   if (isMyRide)
                     Container(
                       margin: const EdgeInsets.only(top: 8),
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(color: AppColors.gold.withValues(alpha:0.1), borderRadius: BorderRadius.circular(6)),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppColors.gold.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
                       child: const Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.directions_car, size: 12, color: AppColors.navy),
+                          Icon(
+                            Icons.directions_car,
+                            size: 12,
+                            color: AppColors.navy,
+                          ),
                           SizedBox(width: 4),
-                          Text('My Ride', style: TextStyle(color: AppColors.navy, fontSize: 10, fontWeight: FontWeight.bold)),
+                          Text(
+                            'My Ride',
+                            style: TextStyle(
+                              color: AppColors.navy,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
                         ],
                       ),
                     ),
+
                   if (sameGenderOnly) ...[
                     const SizedBox(height: 8),
                     Container(
@@ -1040,10 +1118,10 @@ class _RideFeedCard extends StatelessWidget {
                         vertical: 5,
                       ),
                       decoration: BoxDecoration(
-                        color: AppColors.navy.withValues(alpha:0.08),
+                        color: AppColors.navy.withValues(alpha: 0.08),
                         borderRadius: BorderRadius.circular(999),
                         border: Border.all(
-                          color: AppColors.navy.withValues(alpha:0.18),
+                          color: AppColors.navy.withValues(alpha: 0.18),
                         ),
                       ),
                       child: const Row(
@@ -1070,7 +1148,9 @@ class _RideFeedCard extends StatelessWidget {
                 ],
               ),
             ),
+
             const SizedBox(width: 10),
+
             Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
