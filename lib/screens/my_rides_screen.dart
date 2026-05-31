@@ -22,20 +22,80 @@ class MyRidesScreen extends StatelessWidget {
     return text;
   }
 
-  String _formatTimestamp(dynamic value) {
-    if (value == null) return 'Not set';
+  DateTime? _dateTimeFromDynamic(dynamic value) {
+    if (value == null) return null;
 
     if (value is Timestamp) {
-      final dateTime = value.toDate();
-      final hour = dateTime.hour;
-      final minute = dateTime.minute.toString().padLeft(2, '0');
-      final period = hour >= 12 ? 'PM' : 'AM';
-      final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
-
-      return '$displayHour:$minute $period';
+      return value.toDate();
     }
 
-    return value.toString();
+    if (value is DateTime) {
+      return value;
+    }
+
+    if (value is int) {
+      return DateTime.fromMillisecondsSinceEpoch(value);
+    }
+
+    if (value is String) {
+      return DateTime.tryParse(value);
+    }
+
+    return null;
+  }
+
+  String _formatShortDate(DateTime dateTime) {
+    final String day = dateTime.day.toString().padLeft(2, '0');
+    final String month = dateTime.month.toString().padLeft(2, '0');
+
+    return '$day/$month';
+  }
+
+  String _formatTimeOnly(DateTime dateTime) {
+    final int hour = dateTime.hour;
+    final String minute = dateTime.minute.toString().padLeft(2, '0');
+    final String period = hour >= 12 ? 'PM' : 'AM';
+    final int displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+
+    return '$displayHour:$minute $period';
+  }
+
+  String _formatTimestamp(dynamic value) {
+    final DateTime? dateTime = _dateTimeFromDynamic(value);
+
+    if (dateTime == null) {
+      if (value == null) return 'Not set';
+      return value.toString();
+    }
+
+    return '${_formatShortDate(dateTime)} • ${_formatTimeOnly(dateTime)}';
+  }
+
+  String _formatDepartureRange(dynamic earliestValue, dynamic latestValue) {
+    final DateTime? earliest = _dateTimeFromDynamic(earliestValue);
+    final DateTime? latest = _dateTimeFromDynamic(latestValue);
+
+    if (earliest == null && latest == null) {
+      return 'Not set';
+    }
+
+    if (earliest == null) {
+      return _formatTimestamp(latestValue);
+    }
+
+    if (latest == null) {
+      return _formatTimestamp(earliestValue);
+    }
+
+    final bool sameDate = earliest.year == latest.year &&
+        earliest.month == latest.month &&
+        earliest.day == latest.day;
+
+    if (sameDate) {
+      return '${_formatShortDate(earliest)} • ${_formatTimeOnly(earliest)} - ${_formatTimeOnly(latest)}';
+    }
+
+    return '${_formatShortDate(earliest)} • ${_formatTimeOnly(earliest)} - ${_formatShortDate(latest)} • ${_formatTimeOnly(latest)}';
   }
 
   void _showMessage(
@@ -75,7 +135,11 @@ class MyRidesScreen extends StatelessWidget {
   }
 
   void _closeLoadingDialog(BuildContext context) {
-    Navigator.of(context, rootNavigator: true).pop();
+    final navigator = Navigator.of(context, rootNavigator: true);
+
+    if (navigator.canPop()) {
+      navigator.pop();
+    }
   }
 
   void _showQrDialog({
@@ -83,6 +147,7 @@ class MyRidesScreen extends StatelessWidget {
     required String rideId,
   }) {
     final String? uid = FirebaseAuth.instance.currentUser?.uid;
+
     if (uid == null) return;
 
     final String qrData = 'campuspool:$rideId:$uid';
@@ -182,6 +247,7 @@ class MyRidesScreen extends StatelessWidget {
     if (confirm != true) return;
 
     if (!context.mounted) return;
+
     _showLoadingDialog(context, 'Cancelling booking...');
 
     try {
@@ -189,6 +255,7 @@ class MyRidesScreen extends StatelessWidget {
 
       if (context.mounted) {
         _closeLoadingDialog(context);
+
         _showMessage(
           context,
           message: 'Booking cancelled successfully.',
@@ -198,6 +265,7 @@ class MyRidesScreen extends StatelessWidget {
     } catch (e) {
       if (context.mounted) {
         _closeLoadingDialog(context);
+
         _showMessage(
           context,
           message: e.toString().replaceAll('Exception: ', ''),
@@ -246,6 +314,7 @@ class MyRidesScreen extends StatelessWidget {
     if (confirm != true) return;
 
     if (!context.mounted) return;
+
     _showLoadingDialog(context, 'Cancelling ride...');
 
     try {
@@ -253,6 +322,7 @@ class MyRidesScreen extends StatelessWidget {
 
       if (context.mounted) {
         _closeLoadingDialog(context);
+
         _showMessage(
           context,
           message: 'Ride cancelled successfully.',
@@ -262,6 +332,7 @@ class MyRidesScreen extends StatelessWidget {
     } catch (e) {
       if (context.mounted) {
         _closeLoadingDialog(context);
+
         _showMessage(
           context,
           message: e.toString().replaceAll('Exception: ', ''),
@@ -307,6 +378,7 @@ class MyRidesScreen extends StatelessWidget {
     if (confirm != true) return;
 
     if (!context.mounted) return;
+
     _showLoadingDialog(context, 'Removing from history...');
 
     try {
@@ -314,6 +386,7 @@ class MyRidesScreen extends StatelessWidget {
 
       if (context.mounted) {
         _closeLoadingDialog(context);
+
         _showMessage(
           context,
           message: 'Ride removed from history.',
@@ -323,6 +396,7 @@ class MyRidesScreen extends StatelessWidget {
     } catch (e) {
       if (context.mounted) {
         _closeLoadingDialog(context);
+
         _showMessage(
           context,
           message: e.toString().replaceAll('Exception: ', ''),
@@ -333,16 +407,7 @@ class MyRidesScreen extends StatelessWidget {
   }
 
   Stream<QuerySnapshot<Map<String, dynamic>>> _myBookedRidesStream() {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-
-    if (uid == null) {
-      return const Stream.empty();
-    }
-
-    return FirebaseFirestore.instance
-        .collection('rides')
-        .where('passengerIds', arrayContains: uid)
-        .snapshots();
+    return FirebaseFirestore.instance.collection('rides').snapshots();
   }
 
   Stream<QuerySnapshot<Map<String, dynamic>>> _myDrivingRidesStream() {
@@ -354,7 +419,7 @@ class MyRidesScreen extends StatelessWidget {
 
     return FirebaseFirestore.instance
         .collection('rides')
-        .where('driverId', isEqualTo: uid)
+        .where(RideService.fieldDriverId, isEqualTo: uid)
         .snapshots();
   }
 
@@ -367,12 +432,105 @@ class MyRidesScreen extends StatelessWidget {
 
     return docs.where((doc) {
       final data = doc.data();
+
       final hiddenList = List<String>.from(
         data[RideService.fieldHiddenFromHistoryFor] ?? [],
       );
 
       return !hiddenList.contains(uid);
     }).toList();
+  }
+
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> _filterRidingHistory(
+      List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+      ) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+
+    if (uid == null) return [];
+
+    return docs.where((doc) {
+      final ride = doc.data();
+
+      final List<String> passengerIds =
+          (ride[RideService.fieldPassengerIds] as List<dynamic>?)
+              ?.map((item) => item.toString())
+              .toList() ??
+              <String>[];
+
+      final dynamic roster = ride[RideService.fieldPassengerRoster];
+
+      final bool existsInRoster = roster is Map && roster.containsKey(uid);
+      final bool existsInPassengerIds = passengerIds.contains(uid);
+
+      return existsInRoster || existsInPassengerIds;
+    }).toList();
+  }
+
+  Map<String, dynamic>? _myBookingFromRide(Map<String, dynamic> ride) {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+
+    if (uid == null) return null;
+
+    final dynamic roster = ride[RideService.fieldPassengerRoster];
+
+    if (roster is Map && roster[uid] is Map) {
+      return Map<String, dynamic>.from(roster[uid]);
+    }
+
+    return null;
+  }
+
+  String _myBookingStatus(Map<String, dynamic> ride) {
+    final booking = _myBookingFromRide(ride);
+
+    return booking?['bookingStatus']?.toString() ??
+        RideService.bookingStatusActive;
+  }
+
+  bool _isMyBookingActive(Map<String, dynamic> ride) {
+    return _myBookingStatus(ride) == RideService.bookingStatusActive;
+  }
+
+  String _ridingStatusLabel({
+    required Map<String, dynamic> ride,
+    required String rideStatus,
+    required bool isPast,
+  }) {
+    final String bookingStatus = _myBookingStatus(ride);
+
+    if (bookingStatus == RideService.bookingStatusCancelled) {
+      return 'Booking Cancelled';
+    }
+
+    if (bookingStatus == RideService.bookingStatusRemoved) {
+      return 'Removed / No-Show';
+    }
+
+    return _statusLabel(
+      status: rideStatus,
+      isPast: isPast,
+    );
+  }
+
+  Color _ridingStatusColor({
+    required Map<String, dynamic> ride,
+    required String rideStatus,
+    required bool isPast,
+  }) {
+    final String bookingStatus = _myBookingStatus(ride);
+
+    if (bookingStatus == RideService.bookingStatusCancelled) {
+      return Colors.redAccent;
+    }
+
+    if (bookingStatus == RideService.bookingStatusRemoved) {
+      return Colors.orange;
+    }
+
+    return _statusColor(
+      status: rideStatus,
+      isPast: isPast,
+    );
   }
 
   void _openDriverRoster({
@@ -391,70 +549,177 @@ class MyRidesScreen extends StatelessWidget {
     );
   }
 
-  Color _statusColor(String status, bool isExpired) {
-    if (status == RideService.statusCompleted) return Colors.green;
-    if (status == RideService.statusCancelled) return Colors.redAccent;
-    if (status == RideService.statusStarted) return const Color(0xFF2563EB);
-    if (status == RideService.statusArrivedAtPickup) return const Color(0xFFD97706);
-    if (isExpired) return Colors.orange;
-    if (status == RideService.statusActive) return Colors.blue;
-    return Colors.grey;
-  }
-
-  String _statusLabel(String status, bool isExpired) {
-    if (status == RideService.statusCompleted) return 'Completed';
-    if (status == RideService.statusCancelled) return 'Cancelled';
-    if (status == RideService.statusStarted) return 'In Progress';
-    if (status == RideService.statusArrivedAtPickup) return 'At Pickup';
-    if (isExpired) return 'Expired';
-    if (status == RideService.statusActive) return 'Upcoming';
-    return 'In Progress';
-  }
-
-  int _rideSortPriority(Map<String, dynamic> ride) {
+  bool _isPastRide(Map<String, dynamic> ride) {
     final String status = _safeText(
       ride[RideService.fieldStatus],
       RideService.statusActive,
     );
 
-    final bool isExpired = RideService().isRideExpired(ride);
+    if (status == RideService.statusCompleted) {
+      return true;
+    }
 
-    if (status == RideService.statusArrivedAtPickup) return 0;
-    if (status == RideService.statusStarted) return 1;
-    if (status == RideService.statusActive && !isExpired) return 2;
-    if (status == RideService.statusCompleted) return 3;
-    if (isExpired) return 4;
-    if (status == RideService.statusCancelled) return 5;
+    return RideService().isRideExpired(ride);
+  }
 
-    return 6;
+  bool _isRideCancelled(Map<String, dynamic> ride) {
+    final String status = _safeText(
+      ride[RideService.fieldStatus],
+      RideService.statusActive,
+    );
+
+    return status == RideService.statusCancelled;
+  }
+
+  bool _isMyRidingBookingCancelledOrRemoved(Map<String, dynamic> ride) {
+    final String bookingStatus = _myBookingStatus(ride);
+
+    return bookingStatus == RideService.bookingStatusCancelled ||
+        bookingStatus == RideService.bookingStatusRemoved;
+  }
+
+  DateTime? _rideSortTime(Map<String, dynamic> ride) {
+    return RideService().getEarliestDepartureDateTime(ride);
+  }
+
+  int _compareFutureTimesAscending(
+      Map<String, dynamic> rideA,
+      Map<String, dynamic> rideB,
+      ) {
+    final DateTime? timeA = _rideSortTime(rideA);
+    final DateTime? timeB = _rideSortTime(rideB);
+
+    if (timeA == null && timeB == null) return 0;
+    if (timeA == null) return 1;
+    if (timeB == null) return -1;
+
+    return timeA.compareTo(timeB);
+  }
+
+  int _comparePastTimesDescending(
+      Map<String, dynamic> rideA,
+      Map<String, dynamic> rideB,
+      ) {
+    final DateTime? timeA = _rideSortTime(rideA);
+    final DateTime? timeB = _rideSortTime(rideB);
+
+    if (timeA == null && timeB == null) return 0;
+    if (timeA == null) return 1;
+    if (timeB == null) return -1;
+
+    return timeB.compareTo(timeA);
+  }
+
+  int _drivingSortGroup(Map<String, dynamic> ride) {
+    final bool isPast = _isPastRide(ride);
+    final bool isCancelled = _isRideCancelled(ride);
+
+    // 0 = active upcoming / active in-progress rides
+    if (!isPast && !isCancelled) {
+      return 0;
+    }
+
+    // 1 = cancelled ride, but its date/time has not passed yet
+    if (!isPast && isCancelled) {
+      return 1;
+    }
+
+    // 2 = past/history rides, newest first, no matter status
+    return 2;
+  }
+
+  int _ridingSortGroup(Map<String, dynamic> ride) {
+    final bool isPast = _isPastRide(ride);
+    final bool rideCancelled = _isRideCancelled(ride);
+    final bool myBookingCancelledOrRemoved =
+    _isMyRidingBookingCancelledOrRemoved(ride);
+
+    // 0 = active upcoming / in-progress rides where my booking is active
+    if (!isPast && !rideCancelled && !myBookingCancelledOrRemoved) {
+      return 0;
+    }
+
+    // 1 = cancelled / removed / no-show, but ride time is still upcoming
+    if (!isPast) {
+      return 1;
+    }
+
+    // 2 = past/history rides, newest first, no matter status
+    return 2;
   }
 
   int _compareRideDocs(
       QueryDocumentSnapshot<Map<String, dynamic>> a,
       QueryDocumentSnapshot<Map<String, dynamic>> b,
       ) {
-    final rideA = a.data();
-    final rideB = b.data();
+    final Map<String, dynamic> rideA = a.data();
+    final Map<String, dynamic> rideB = b.data();
 
-    final int priorityA = _rideSortPriority(rideA);
-    final int priorityB = _rideSortPriority(rideB);
+    final int groupA = _drivingSortGroup(rideA);
+    final int groupB = _drivingSortGroup(rideB);
 
-    if (priorityA != priorityB) {
-      return priorityA.compareTo(priorityB);
+    if (groupA != groupB) {
+      return groupA.compareTo(groupB);
     }
 
-    final timeA = RideService().getEarliestDepartureDateTime(rideA);
-    final timeB = RideService().getEarliestDepartureDateTime(rideB);
-
-    if (timeA == null && timeB == null) return 0;
-    if (timeA == null) return 1;
-    if (timeB == null) return -1;
-
-    if (priorityA == 0) {
-      return timeA.compareTo(timeB);
+    if (groupA == 0 || groupA == 1) {
+      return _compareFutureTimesAscending(rideA, rideB);
     }
 
-    return timeB.compareTo(timeA);
+    return _comparePastTimesDescending(rideA, rideB);
+  }
+
+  int _compareRidingRideDocs(
+      QueryDocumentSnapshot<Map<String, dynamic>> a,
+      QueryDocumentSnapshot<Map<String, dynamic>> b,
+      ) {
+    final Map<String, dynamic> rideA = a.data();
+    final Map<String, dynamic> rideB = b.data();
+
+    final int groupA = _ridingSortGroup(rideA);
+    final int groupB = _ridingSortGroup(rideB);
+
+    if (groupA != groupB) {
+      return groupA.compareTo(groupB);
+    }
+
+    if (groupA == 0 || groupA == 1) {
+      return _compareFutureTimesAscending(rideA, rideB);
+    }
+
+    return _comparePastTimesDescending(rideA, rideB);
+  }
+
+  Color _statusColor({
+    required String status,
+    required bool isPast,
+  }) {
+    if (status == RideService.statusCompleted) return Colors.green;
+    if (status == RideService.statusCancelled) return Colors.redAccent;
+    if (status == RideService.statusStarted) return const Color(0xFF2563EB);
+
+    if (status == RideService.statusArrivedAtPickup) {
+      return const Color(0xFFD97706);
+    }
+
+    if (isPast) return Colors.orange;
+    if (status == RideService.statusActive) return Colors.blue;
+
+    return Colors.grey;
+  }
+
+  String _statusLabel({
+    required String status,
+    required bool isPast,
+  }) {
+    if (status == RideService.statusCompleted) return 'Completed';
+    if (status == RideService.statusCancelled) return 'Cancelled';
+    if (status == RideService.statusStarted) return 'In Progress';
+    if (status == RideService.statusArrivedAtPickup) return 'At Pickup';
+    if (isPast) return 'Expired';
+    if (status == RideService.statusActive) return 'Upcoming';
+
+    return 'In Progress';
   }
 
   @override
@@ -501,19 +766,21 @@ class MyRidesScreen extends StatelessWidget {
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: _myBookedRidesStream(),
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
+        if (snapshot.connectionState == ConnectionState.waiting &&
+            !snapshot.hasData) {
           return const Center(
             child: CircularProgressIndicator(color: AppColors.navy),
           );
         }
 
         final allDocs = snapshot.data?.docs ?? [];
-        final docs = _removeHiddenRides(allDocs);
+        final visibleDocs = _removeHiddenRides(allDocs);
+        final docs = _filterRidingHistory(visibleDocs);
 
         if (docs.isEmpty) {
           return const Center(
             child: Text(
-              'No booked rides found.',
+              'No Booked Rides Found.',
               style: TextStyle(color: AppColors.greyText),
             ),
           );
@@ -522,7 +789,7 @@ class MyRidesScreen extends StatelessWidget {
         final sortedDocs =
         List<QueryDocumentSnapshot<Map<String, dynamic>>>.from(docs);
 
-        sortedDocs.sort(_compareRideDocs);
+        sortedDocs.sort(_compareRidingRideDocs);
 
         return ListView.separated(
           padding: const EdgeInsets.all(24.0),
@@ -546,7 +813,8 @@ class MyRidesScreen extends StatelessWidget {
     return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
       stream: _myDrivingRidesStream(),
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
+        if (snapshot.connectionState == ConnectionState.waiting &&
+            !snapshot.hasData) {
           return const Center(
             child: CircularProgressIndicator(color: AppColors.navy),
           );
@@ -612,11 +880,8 @@ class MyRidesScreen extends StatelessWidget {
       'Destination',
     );
 
-    final String earliestDeparture = _formatTimestamp(
+    final String departureRange = _formatDepartureRange(
       ride[RideService.fieldEarliestDeparture],
-    );
-
-    final String latestDeparture = _formatTimestamp(
       ride[RideService.fieldLatestDeparture],
     );
 
@@ -630,38 +895,63 @@ class MyRidesScreen extends StatelessWidget {
       RideService.statusActive,
     );
 
-    final bool isExpired = RideService().isRideExpired(ride);
+    final bool isPast = _isPastRide(ride);
+    final bool bookingIsActive = _isMyBookingActive(ride);
 
-    final bool isInProgress = status == RideService.statusStarted ||
-        status == RideService.statusArrivedAtPickup;
+    final bool isInProgress = bookingIsActive &&
+        (status == RideService.statusStarted ||
+            status == RideService.statusArrivedAtPickup);
 
-    // Check if the driver has marked arrival at THIS rider's pickup specifically
-    final String? uid = FirebaseAuth.instance.currentUser?.uid;
-    final dynamic roster = ride[RideService.fieldPassengerRoster];
-    final dynamic myBooking =
-    (roster is Map && uid != null) ? roster[uid] : null;
-    final bool driverArrivedAtMe = myBooking is Map &&
+    final Map<String, dynamic>? myBooking = _myBookingFromRide(ride);
+
+    final bool driverArrivedAtMe = myBooking != null &&
         myBooking[RideService.bookingFieldDriverArrivedAt] != null;
-    final bool isScanned = myBooking is Map &&
+
+    final bool isScanned = myBooking != null &&
         myBooking[RideService.bookingFieldIsPickedUp] == true;
 
-    final bool isCompleted = status == RideService.statusCompleted;
-    final bool hasRated = uid != null &&
-        RideService().hasAlreadyRated(ride, uid);
+    final bool isCompleted =
+        bookingIsActive && status == RideService.statusCompleted;
+
+    final String? uid = FirebaseAuth.instance.currentUser?.uid;
+
+    final bool hasRated =
+        uid != null && RideService().hasAlreadyRated(ride, uid);
+
     final String driverId = _safeText(
       ride[RideService.fieldDriverId],
       '',
     );
 
-    final bool canCancel =
+    final bool canCancel = bookingIsActive &&
         status == RideService.statusActive &&
-            !isExpired &&
-            RideService().canCancelRideFromData(ride);
+        !isPast &&
+        RideService().canCancelRideFromData(ride);
 
-    final String badgeText = _statusLabel(status, isExpired);
-    final Color badgeColor = _statusColor(status, isExpired);
+    final String badgeText = _ridingStatusLabel(
+      ride: ride,
+      rideStatus: status,
+      isPast: isPast,
+    );
 
-    // Auto-show rating dialog once when ride completes and hasn't been rated
+    final Color badgeColor = _ridingStatusColor(
+      ride: ride,
+      rideStatus: status,
+      isPast: isPast,
+    );
+
+    final bool canShowQr = bookingIsActive &&
+        !isPast &&
+        (status == RideService.statusActive ||
+            status == RideService.statusStarted ||
+            status == RideService.statusArrivedAtPickup);
+
+    final bool shouldShowRemoveFromHistory =
+        !bookingIsActive ||
+            status == RideService.statusCancelled ||
+            isPast ||
+            status == RideService.statusCompleted;
+
     if (isCompleted && !hasRated && driverId.isNotEmpty && uid != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (context.mounted) {
@@ -699,26 +989,9 @@ class MyRidesScreen extends StatelessWidget {
                   ),
                 ),
               ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: badgeColor.withValues(alpha:0.12),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Text(
-                  badgeText,
-                  style: TextStyle(
-                    color: badgeColor,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 11,
-                  ),
-                ),
-              ),
             ],
           ),
-
           const SizedBox(height: 8),
-
           Text(
             'Driver: $driverName',
             style: const TextStyle(
@@ -726,9 +999,7 @@ class MyRidesScreen extends StatelessWidget {
               fontSize: 13,
             ),
           ),
-
           const SizedBox(height: 4),
-
           GestureDetector(
             onTap: driverPhone == 'No phone number'
                 ? null
@@ -754,19 +1025,15 @@ class MyRidesScreen extends StatelessWidget {
               ],
             ),
           ),
-
           const SizedBox(height: 4),
-
           Text(
-            '$earliestDeparture - $latestDeparture',
+            departureRange,
             style: const TextStyle(
               color: AppColors.greyText,
               fontSize: 13,
             ),
           ),
-
           const SizedBox(height: 12),
-
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
@@ -788,22 +1055,20 @@ class MyRidesScreen extends StatelessWidget {
               ),
             ],
           ),
-
           const SizedBox(height: 14),
-
-          SizedBox(
-            width: double.infinity,
-            height: 44,
-            child: isInProgress
-                ? Container(
+          if (isInProgress)
+            Container(
               width: double.infinity,
               height: 44,
               decoration: BoxDecoration(
                 color: isScanned
-                    ? const Color(0xFF2563EB).withValues(alpha:0.08)
+                    ? const Color(0xFF2563EB).withValues(alpha: 0.08)
                     : driverArrivedAtMe
-                    ? const Color(0xFFD97706).withValues(alpha:0.10)
-                    : _statusColor(status, isExpired).withValues(alpha:0.08),
+                    ? const Color(0xFFD97706).withValues(alpha: 0.10)
+                    : _statusColor(
+                  status: status,
+                  isPast: isPast,
+                ).withValues(alpha: 0.08),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Row(
@@ -819,22 +1084,28 @@ class MyRidesScreen extends StatelessWidget {
                         ? const Color(0xFF2563EB)
                         : driverArrivedAtMe
                         ? const Color(0xFFD97706)
-                        : _statusColor(status, isExpired),
+                        : _statusColor(
+                      status: status,
+                      isPast: isPast,
+                    ),
                     size: 18,
                   ),
                   const SizedBox(width: 8),
                   Text(
                     isScanned
-                        ? 'Ride in progress'
+                        ? 'Ride in Progress'
                         : driverArrivedAtMe
-                        ? 'Driver has arrived at your pickup!'
-                        : 'Driver is on the way',
+                        ? 'Driver Has Arrived At Your Pickup!'
+                        : 'Driver is On The Way',
                     style: TextStyle(
                       color: isScanned
                           ? const Color(0xFF2563EB)
                           : driverArrivedAtMe
                           ? const Color(0xFFD97706)
-                          : _statusColor(status, isExpired),
+                          : _statusColor(
+                        status: status,
+                        isPast: isPast,
+                      ),
                       fontWeight: FontWeight.bold,
                       fontSize: 13,
                     ),
@@ -842,62 +1113,97 @@ class MyRidesScreen extends StatelessWidget {
                 ],
               ),
             )
-                : OutlinedButton.icon(
-              onPressed: canCancel
-                  ? () => _confirmCancelBooking(
-                context: context,
-                rideId: rideId,
+          else if (canCancel)
+            SizedBox(
+              width: double.infinity,
+              height: 44,
+              child: OutlinedButton.icon(
+                onPressed: () => _confirmCancelBooking(
+                  context: context,
+                  rideId: rideId,
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.redAccent,
+                  side: const BorderSide(color: Colors.redAccent),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                icon: const Icon(Icons.cancel_outlined, size: 18),
+                label: const Text(
+                  'Cancel Booking',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            )
+          else if (shouldShowRemoveFromHistory)
+              SizedBox(
+                width: double.infinity,
+                height: 44,
+                child: OutlinedButton.icon(
+                  onPressed: () => _confirmRemoveFromHistory(
+                    context: context,
+                    rideId: rideId,
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.navy,
+                    side: const BorderSide(color: AppColors.navy),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  icon: const Icon(Icons.history_toggle_off, size: 18),
+                  label: const Text(
+                    'Remove from History',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
               )
-                  : null,
-              style: OutlinedButton.styleFrom(
-                foregroundColor:
-                canCancel ? Colors.redAccent : AppColors.greyText,
-                side: BorderSide(
-                  color:
-                  canCancel ? Colors.redAccent : AppColors.greyText,
-                ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
+            else
+              SizedBox(
+                width: double.infinity,
+                height: 44,
+                child: OutlinedButton.icon(
+                  onPressed: null,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.greyText,
+                    side: const BorderSide(color: AppColors.greyText),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  icon: const Icon(Icons.lock_outline, size: 18),
+                  label: const Text(
+                    'Cancellation Locked',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
-              icon: Icon(
-                canCancel ? Icons.cancel_outlined : Icons.lock_outline,
-                size: 18,
-              ),
-              label: Text(
-                canCancel ? 'Cancel Booking' : 'Cancellation Locked',
-                style: const TextStyle(fontWeight: FontWeight.bold),
+          if (canShowQr) ...[
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              height: 44,
+              child: OutlinedButton.icon(
+                onPressed: () => _showQrDialog(
+                  context: context,
+                  rideId: rideId,
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.navy,
+                  side: const BorderSide(color: AppColors.navy),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                icon: const Icon(Icons.qr_code_2, size: 18),
+                label: const Text(
+                  'Show Boarding Pass',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
               ),
             ),
-          ),
-
-          const SizedBox(height: 10),
-
-          // Always-visible QR boarding pass button
-          SizedBox(
-            width: double.infinity,
-            height: 44,
-            child: OutlinedButton.icon(
-              onPressed: () => _showQrDialog(
-                context: context,
-                rideId: rideId,
-              ),
-              style: OutlinedButton.styleFrom(
-                foregroundColor: AppColors.navy,
-                side: const BorderSide(color: AppColors.navy),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-              ),
-              icon: const Icon(Icons.qr_code_2, size: 18),
-              label: const Text(
-                'Show Boarding Pass',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ),
-          ),
-
-          // Rate Driver button — only on completed unrated rides
+          ],
           if (isCompleted && !hasRated && driverId.isNotEmpty) ...[
             const SizedBox(height: 10),
             SizedBox(
@@ -925,14 +1231,13 @@ class MyRidesScreen extends StatelessWidget {
               ),
             ),
           ],
-
           if (isCompleted && hasRated) ...[
             const SizedBox(height: 10),
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(vertical: 10),
               decoration: BoxDecoration(
-                color: AppColors.gold.withValues(alpha:0.1),
+                color: AppColors.gold.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: const Row(
@@ -972,11 +1277,8 @@ class MyRidesScreen extends StatelessWidget {
       'Destination',
     );
 
-    final String earliestDeparture = _formatTimestamp(
+    final String departureRange = _formatDepartureRange(
       ride[RideService.fieldEarliestDeparture],
-    );
-
-    final String latestDeparture = _formatTimestamp(
       ride[RideService.fieldLatestDeparture],
     );
 
@@ -990,22 +1292,27 @@ class MyRidesScreen extends StatelessWidget {
       RideService.statusActive,
     );
 
-    final bool isExpired = RideService().isRideExpired(ride);
+    final bool isPast = _isPastRide(ride);
 
-    // Rides that are in-progress are still "active" from a UI perspective
     final bool isInProgress = status == RideService.statusStarted ||
         status == RideService.statusArrivedAtPickup;
 
-    final bool isNotActiveOrExpired =
-        !isInProgress && (status != RideService.statusActive || isExpired);
+    final bool isNotActiveOrPast =
+        !isInProgress && (status != RideService.statusActive || isPast);
 
-    final bool canCancel =
-        status == RideService.statusActive &&
-            !isExpired &&
-            RideService().canCancelRideFromData(ride);
+    final bool canCancel = status == RideService.statusActive &&
+        !isPast &&
+        RideService().canCancelRideFromData(ride);
 
-    final String badgeText = _statusLabel(status, isExpired);
-    final Color badgeColor = _statusColor(status, isExpired);
+    final String badgeText = _statusLabel(
+      status: status,
+      isPast: isPast,
+    );
+
+    final Color badgeColor = _statusColor(
+      status: status,
+      isPast: isPast,
+    );
 
     final int availableSeats = ride[RideService.fieldAvailableSeats] is int
         ? ride[RideService.fieldAvailableSeats]
@@ -1026,7 +1333,7 @@ class MyRidesScreen extends StatelessWidget {
     Color buttonColor;
     VoidCallback? buttonAction;
 
-    if (isNotActiveOrExpired) {
+    if (isNotActiveOrPast) {
       buttonText = 'Remove from History';
       buttonIcon = Icons.history_toggle_off;
       buttonColor = AppColors.navy;
@@ -1086,7 +1393,7 @@ class MyRidesScreen extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        '$earliestDeparture - $latestDeparture',
+                        departureRange,
                         style: const TextStyle(
                           color: AppColors.greyText,
                           fontSize: 12,
@@ -1115,24 +1422,6 @@ class MyRidesScreen extends StatelessWidget {
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.blue.withValues(alpha:0.12),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: const Text(
-                        'Driver',
-                        style: TextStyle(
-                          color: Colors.blue,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 11,
-                        ),
-                      ),
-                    ),
                     const SizedBox(height: 6),
                     Text(
                       '$price EGP',
@@ -1181,6 +1470,7 @@ class MyRidesScreen extends StatelessWidget {
     );
   }
 }
+
 // ---------------------------------------------------------------------------
 // WHATSAPP HELPER
 // ---------------------------------------------------------------------------
@@ -1188,6 +1478,7 @@ class MyRidesScreen extends StatelessWidget {
 Future<void> _openWhatsApp(String rawPhone) async {
   final String digits = rawPhone.replaceAll(RegExp(r'[^\d+]'), '');
   final Uri url = Uri.parse('https://wa.me/$digits');
+
   if (await canLaunchUrl(url)) {
     await launchUrl(url, mode: LaunchMode.externalApplication);
   }

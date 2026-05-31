@@ -35,8 +35,8 @@ class AuthService {
   }) async {
     try {
       final emailLower = email.trim().toLowerCase();
-      if (!emailLower.endsWith('@student.aast.edu') && !emailLower.endsWith('@staff.aast.edu')) {
-        throw Exception('Access denied. You must use a valid @student.aast.edu or @staff.aast.edu email.');
+      if (!emailLower.endsWith('@student.aast.edu')) {
+        throw Exception('Access denied. You must use a valid @student.aast.edu');
       }
 
       if (studentId.trim().length != 9) {

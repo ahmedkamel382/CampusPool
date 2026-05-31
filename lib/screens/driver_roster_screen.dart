@@ -1,9 +1,8 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
-
-// --- NEW: Import for checking camera permissions before launching the scanner ---
 import 'package:permission_handler/permission_handler.dart';
 
 import '../theme/app_colors.dart';
@@ -29,6 +28,55 @@ class DriverRosterScreen extends StatelessWidget {
     return text;
   }
 
+  DateTime? _dateTimeFromDynamic(dynamic value) {
+    if (value == null) return null;
+    if (value is Timestamp) return value.toDate();
+    if (value is DateTime) return value;
+    if (value is int) return DateTime.fromMillisecondsSinceEpoch(value);
+    if (value is String) return DateTime.tryParse(value);
+    return null;
+  }
+
+  String _formatShortDate(DateTime dateTime) {
+    final String day = dateTime.day.toString().padLeft(2, '0');
+    final String month = dateTime.month.toString().padLeft(2, '0');
+    return '$day/$month';
+  }
+
+  String _formatTimeOnly(DateTime dateTime) {
+    final int hour = dateTime.hour;
+    final String minute = dateTime.minute.toString().padLeft(2, '0');
+    final String period = hour >= 12 ? 'PM' : 'AM';
+    final int displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+
+    return '$displayHour:$minute $period';
+  }
+
+  String _formatDepartureRange(dynamic earliestValue, dynamic latestValue) {
+    final DateTime? earliest = _dateTimeFromDynamic(earliestValue);
+    final DateTime? latest = _dateTimeFromDynamic(latestValue);
+
+    if (earliest == null && latest == null) return 'Not set';
+
+    if (earliest == null) {
+      return '${_formatShortDate(latest!)} • ${_formatTimeOnly(latest)}';
+    }
+
+    if (latest == null) {
+      return '${_formatShortDate(earliest)} • ${_formatTimeOnly(earliest)}';
+    }
+
+    final bool sameDate = earliest.year == latest.year &&
+        earliest.month == latest.month &&
+        earliest.day == latest.day;
+
+    if (sameDate) {
+      return '${_formatShortDate(earliest)} • ${_formatTimeOnly(earliest)} - ${_formatTimeOnly(latest)}';
+    }
+
+    return '${_formatShortDate(earliest)} • ${_formatTimeOnly(earliest)} - ${_formatShortDate(latest)} • ${_formatTimeOnly(latest)}';
+  }
+
   LatLng? _pickupLatLng(dynamic pickupLocation) {
     if (pickupLocation == null) return null;
     if (pickupLocation is! Map) return null;
@@ -45,10 +93,10 @@ class DriverRosterScreen extends StatelessWidget {
   }
 
   void _showMessage(
-    BuildContext context, {
-    required String message,
-    required bool isError,
-  }) {
+      BuildContext context, {
+        required String message,
+        required bool isError,
+      }) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
@@ -81,9 +129,54 @@ class DriverRosterScreen extends StatelessWidget {
   }
 
   void _closeLoadingDialog(BuildContext context) {
-    if (Navigator.canPop(context)) {
-      Navigator.pop(context);
+    final navigator = Navigator.of(context, rootNavigator: true);
+
+    if (navigator.canPop()) {
+      navigator.pop();
     }
+  }
+
+  bool _isTerminalStatus(String status) {
+    return status == RideService.statusCancelled ||
+        status == RideService.statusCompleted;
+  }
+
+  bool _isInProgressStatus(String status) {
+    return status == RideService.statusStarted ||
+        status == RideService.statusArrivedAtPickup;
+  }
+
+  bool _isActiveExpiredRide(Map<String, dynamic> ride, String status) {
+    return status == RideService.statusActive &&
+        RideService().isRideExpired(ride);
+  }
+
+  String _rosterLockMessage({
+    required String status,
+    required bool isExpired,
+    required bool canEditRoster,
+  }) {
+    if (status == RideService.statusCancelled) {
+      return 'Roster is read-only because this ride was cancelled.';
+    }
+
+    if (status == RideService.statusCompleted) {
+      return 'Roster is read-only because this ride is completed.';
+    }
+
+    if (isExpired) {
+      return 'Roster is read-only because this ride expired before it was started.';
+    }
+
+    if (_isInProgressStatus(status)) {
+      return 'Roster is locked after the ride starts. Use Scan QR or Mark No-Show.';
+    }
+
+    if (!canEditRoster) {
+      return 'Removal is locked 30 minutes before departure.';
+    }
+
+    return '';
   }
 
   Future<void> _confirmRemovePassenger({
@@ -123,6 +216,7 @@ class DriverRosterScreen extends StatelessWidget {
     if (confirm != true) return;
 
     if (!context.mounted) return;
+
     _showLoadingDialog(context, 'Removing rider...');
 
     try {
@@ -154,21 +248,22 @@ class DriverRosterScreen extends StatelessWidget {
   }
 
   List<MapEntry<String, dynamic>> _activePassengersFromRide(
-    Map<String, dynamic> ride,
-  ) {
-    final roster = ride['passengerRoster'];
+      Map<String, dynamic> ride,
+      ) {
+    final roster = ride[RideService.fieldPassengerRoster];
 
     if (roster is! Map) return [];
 
     final Map<String, dynamic> rosterMap = Map<String, dynamic>.from(roster);
 
     final List<MapEntry<String, dynamic>> entries =
-        rosterMap.entries.where((entry) {
+    rosterMap.entries.where((entry) {
       final value = entry.value;
 
       if (value is! Map) return false;
 
-      final status = value['bookingStatus']?.toString() ?? 'active';
+      final status = value['bookingStatus']?.toString() ??
+          RideService.bookingStatusActive;
 
       return status == RideService.bookingStatusActive;
     }).toList();
@@ -220,10 +315,11 @@ class DriverRosterScreen extends StatelessWidget {
           ),
         ),
       ),
-      body: StreamBuilder(
+      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
         stream: RideService().streamRide(rideId),
         builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
+          if (snapshot.connectionState == ConnectionState.waiting &&
+              !snapshot.hasData) {
             return const Center(
               child: CircularProgressIndicator(color: AppColors.navy),
             );
@@ -247,32 +343,56 @@ class DriverRosterScreen extends StatelessWidget {
             );
           }
 
-          final ride = snapshot.data!.data() as Map<String, dynamic>;
+          final ride = snapshot.data!.data() ?? <String, dynamic>{};
 
-          final String originName = _safeText(ride['originName'], 'Origin');
-          final String destinationName =
-              _safeText(ride['destinationName'], 'Destination');
+          final String originName = _safeText(
+            ride[RideService.fieldOriginName],
+            'Origin',
+          );
 
-          final String rideStatus = ride[RideService.fieldStatus]?.toString() ??
-              RideService.statusActive;
+          final String destinationName = _safeText(
+            ride[RideService.fieldDestinationName],
+            'Destination',
+          );
+
+          final String departureRange = _formatDepartureRange(
+            ride[RideService.fieldEarliestDeparture],
+            ride[RideService.fieldLatestDeparture],
+          );
+
+          final String rideStatus =
+              ride[RideService.fieldStatus]?.toString() ??
+                  RideService.statusActive;
+
+          final bool isExpired = _isActiveExpiredRide(ride, rideStatus);
+          final bool isTerminal = _isTerminalStatus(rideStatus) || isExpired;
+          final bool isInProgress = _isInProgressStatus(rideStatus);
 
           final passengers = _activePassengersFromRide(ride);
 
-          final int availableSeats = ride['availableSeats'] is int
-              ? ride['availableSeats']
-              : ride['availableSeats'] is num
-                  ? (ride['availableSeats'] as num).toInt()
-                  : 0;
+          final int availableSeats = ride[RideService.fieldAvailableSeats] is int
+              ? ride[RideService.fieldAvailableSeats]
+              : ride[RideService.fieldAvailableSeats] is num
+              ? (ride[RideService.fieldAvailableSeats] as num).toInt()
+              : 0;
 
-          final int totalSeats = ride['totalSeats'] is int
-              ? ride['totalSeats']
-              : ride['totalSeats'] is num
-                  ? (ride['totalSeats'] as num).toInt()
-                  : 0;
+          final int totalSeats = ride[RideService.fieldTotalSeats] is int
+              ? ride[RideService.fieldTotalSeats]
+              : ride[RideService.fieldTotalSeats] is num
+              ? (ride[RideService.fieldTotalSeats] as num).toInt()
+              : 0;
 
-          final bool canRemovePassengers =
-              RideService().canCancelRideFromData(ride) ||
-                  rideStatus == RideService.statusStarted;
+          final bool canEditRoster = rideStatus == RideService.statusActive &&
+              !isExpired &&
+              RideService().canCancelRideFromData(ride);
+
+          final bool canUsePickupControls = isInProgress && !isTerminal;
+
+          final String lockMessage = _rosterLockMessage(
+            status: rideStatus,
+            isExpired: isExpired,
+            canEditRoster: canEditRoster,
+          );
 
           return ListView(
             padding: const EdgeInsets.all(24),
@@ -305,6 +425,27 @@ class DriverRosterScreen extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.calendar_today_outlined,
+                          color: AppColors.greyText,
+                          size: 15,
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: Text(
+                            departureRange,
+                            style: const TextStyle(
+                              color: AppColors.greyText,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
                     Text(
                       'Seats: $availableSeats/$totalSeats available',
                       style: const TextStyle(
@@ -312,28 +453,36 @@ class DriverRosterScreen extends StatelessWidget {
                         fontSize: 13,
                       ),
                     ),
-                    if (!canRemovePassengers) ...[
+                    if (lockMessage.isNotEmpty) ...[
                       const SizedBox(height: 10),
                       Container(
                         width: double.infinity,
                         padding: const EdgeInsets.all(10),
                         decoration: BoxDecoration(
-                          color: Colors.redAccent.withValues(alpha:0.08),
+                          color: isTerminal
+                              ? Colors.redAccent.withValues(alpha: 0.08)
+                              : AppColors.navy.withValues(alpha: 0.08),
                           borderRadius: BorderRadius.circular(10),
                         ),
-                        child: const Row(
+                        child: Row(
                           children: [
                             Icon(
-                              Icons.lock_outline,
-                              color: Colors.redAccent,
+                              isTerminal
+                                  ? Icons.lock_outline
+                                  : Icons.info_outline,
+                              color: isTerminal
+                                  ? Colors.redAccent
+                                  : AppColors.navy,
                               size: 18,
                             ),
-                            SizedBox(width: 8),
+                            const SizedBox(width: 8),
                             Expanded(
                               child: Text(
-                                'Removal is locked 30 minutes before departure.',
+                                lockMessage,
                                 style: TextStyle(
-                                  color: Colors.redAccent,
+                                  color: isTerminal
+                                      ? Colors.redAccent
+                                      : AppColors.navy,
                                   fontSize: 12,
                                   fontWeight: FontWeight.bold,
                                 ),
@@ -398,7 +547,7 @@ class DriverRosterScreen extends StatelessWidget {
                       ),
                       SizedBox(height: 12),
                       Text(
-                        'No riders booked yet.',
+                        'No active riders in this roster.',
                         style: TextStyle(
                           color: AppColors.greyText,
                           fontWeight: FontWeight.bold,
@@ -418,7 +567,8 @@ class DriverRosterScreen extends StatelessWidget {
                     passengerId: passengerId,
                     passenger: passenger,
                     pickupLatLng: _pickupLatLng(passenger['pickupLocation']),
-                    canRemove: canRemovePassengers,
+                    canRemove: canEditRoster,
+                    canUsePickupControls: canUsePickupControls,
                     onRemove: () => _confirmRemovePassenger(
                       context: context,
                       passengerId: passengerId,
@@ -442,9 +592,9 @@ class DriverRosterScreen extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 Future<void> _openWhatsApp(String rawPhone) async {
-  // Strip everything except digits and leading +
   final String digits = rawPhone.replaceAll(RegExp(r'[^\d+]'), '');
   final Uri url = Uri.parse('https://wa.me/$digits');
+
   if (await canLaunchUrl(url)) {
     await launchUrl(url, mode: LaunchMode.externalApplication);
   }
@@ -457,6 +607,7 @@ class _PassengerCard extends StatefulWidget {
   final Map<String, dynamic> passenger;
   final LatLng? pickupLatLng;
   final bool canRemove;
+  final bool canUsePickupControls;
   final VoidCallback onRemove;
 
   const _PassengerCard({
@@ -466,6 +617,7 @@ class _PassengerCard extends StatefulWidget {
     required this.passenger,
     required this.pickupLatLng,
     required this.canRemove,
+    required this.canUsePickupControls,
     required this.onRemove,
   });
 
@@ -475,16 +627,20 @@ class _PassengerCard extends StatefulWidget {
 
 class _PassengerCardState extends State<_PassengerCard> {
   bool _isMarkingArrived = false;
+  bool _isMarkingNoShow = false;
 
   String _safeText(dynamic value, String fallback) {
     if (value == null) return fallback;
+
     final text = value.toString().trim();
     if (text.isEmpty) return fallback;
+
     return text;
   }
 
   Future<void> _markArrived() async {
     setState(() => _isMarkingArrived = true);
+
     try {
       await RideService().markDriverArrivedAtPassenger(
         rideId: widget.rideId,
@@ -492,32 +648,109 @@ class _PassengerCardState extends State<_PassengerCard> {
       );
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.toString().replaceAll('Exception: ', '')),
-          backgroundColor: Colors.redAccent,
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString().replaceAll('Exception: ', '')),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
       }
     } finally {
-      if (mounted) setState(() => _isMarkingArrived = false);
+      if (mounted) {
+        setState(() => _isMarkingArrived = false);
+      }
+    }
+  }
+
+  Future<void> _confirmMarkNoShow({
+    required String riderName,
+  }) async {
+    final bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text(
+            'Mark No-Show?',
+            style: TextStyle(color: Colors.redAccent),
+          ),
+          content: Text(
+            'Mark $riderName as no-show? They will be removed from the active roster, and you will be able to complete the ride without scanning them.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text(
+                'Cancel',
+                style: TextStyle(color: AppColors.greyText),
+              ),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.redAccent,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Mark No-Show'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirm != true) return;
+
+    if (!mounted) return;
+
+    setState(() => _isMarkingNoShow = true);
+
+    try {
+      await RideService().markPassengerNoShow(
+        rideId: widget.rideId,
+        passengerId: widget.passengerId,
+      );
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('$riderName marked as no-show.'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString().replaceAll('Exception: ', '')),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isMarkingNoShow = false);
+      }
     }
   }
 
   Future<void> _openScanner(BuildContext context) async {
-    // --- NEW: Ask for OS camera permissions first to prevent black screens ---
     final status = await Permission.camera.request();
 
     if (status.isDenied || status.isPermanentlyDenied) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Camera permission is required to scan QR codes.'),
-        backgroundColor: Colors.redAccent,
-      ));
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Camera permission is required to scan QR codes.'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+
       return;
     }
 
     if (!context.mounted) return;
 
-    // 2. Second Async Gap
     final result = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
@@ -532,28 +765,41 @@ class _PassengerCardState extends State<_PassengerCard> {
     if (!context.mounted) return;
 
     if (result == true) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Rider scanned and on board!'),
-        backgroundColor: Colors.green,
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Rider scanned and on board!'),
+          backgroundColor: Colors.green,
+        ),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final String riderName = _safeText(widget.passenger['riderName'], 'Rider');
-    final String riderPhone =
-        _safeText(widget.passenger['riderPhone'], 'No phone');
-    final String riderImageUrl =
-        _safeText(widget.passenger['riderImageUrl'], '');
-    final String pickupName =
-        _safeText(widget.passenger['pickupName'], 'Saved Home Location');
+
+    final String riderPhone = _safeText(
+      widget.passenger['riderPhone'],
+      'No phone',
+    );
+
+    final String riderImageUrl = _safeText(
+      widget.passenger['riderImageUrl'],
+      '',
+    );
+
+    final String pickupName = _safeText(
+      widget.passenger['pickupName'],
+      'Saved Home Location',
+    );
 
     final bool isPickedUp =
         widget.passenger[RideService.bookingFieldIsPickedUp] == true;
+
     final bool driverArrived =
         widget.passenger[RideService.bookingFieldDriverArrivedAt] != null;
-    final bool isRideStarted = widget.rideStatus == RideService.statusStarted;
+
+    final bool canMarkNoShow = widget.canUsePickupControls && !isPickedUp;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
@@ -578,21 +824,21 @@ class _PassengerCardState extends State<_PassengerCard> {
                 ),
                 child: riderImageUrl.isNotEmpty
                     ? Image.network(
-                        riderImageUrl,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) {
-                          return const Icon(
-                            Icons.person,
-                            color: AppColors.greyText,
-                            size: 32,
-                          );
-                        },
-                      )
+                  riderImageUrl,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) {
+                    return const Icon(
+                      Icons.person,
+                      color: AppColors.greyText,
+                      size: 32,
+                    );
+                  },
+                )
                     : const Icon(
-                        Icons.person,
-                        color: AppColors.greyText,
-                        size: 32,
-                      ),
+                  Icons.person,
+                  color: AppColors.greyText,
+                  size: 32,
+                ),
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -621,21 +867,21 @@ class _PassengerCardState extends State<_PassengerCard> {
               IconButton(
                 tooltip: widget.canRemove
                     ? 'Remove rider'
-                    : 'Removal locked 30 minutes before departure',
+                    : widget.canUsePickupControls
+                    ? 'Use Mark No-Show after the ride starts'
+                    : 'Roster editing is locked for this ride',
                 onPressed: widget.canRemove ? widget.onRemove : null,
                 icon: Icon(
                   widget.canRemove
                       ? Icons.person_remove_alt_1
                       : Icons.lock_outline,
                   color:
-                      widget.canRemove ? Colors.redAccent : AppColors.greyText,
+                  widget.canRemove ? Colors.redAccent : AppColors.greyText,
                 ),
               ),
             ],
           ),
-
           const SizedBox(height: 16),
-
           Row(
             children: [
               const Icon(
@@ -656,9 +902,7 @@ class _PassengerCardState extends State<_PassengerCard> {
               ),
             ],
           ),
-
           const SizedBox(height: 12),
-
           if (widget.pickupLatLng != null)
             Container(
               height: 150,
@@ -678,7 +922,7 @@ class _PassengerCardState extends State<_PassengerCard> {
                 children: [
                   TileLayer(
                     urlTemplate:
-                        'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                     userAgentPackageName: 'com.aastmt.campuspool',
                   ),
                   MarkerLayer(
@@ -714,9 +958,7 @@ class _PassengerCardState extends State<_PassengerCard> {
                 ),
               ),
             ),
-
           const SizedBox(height: 12),
-
           SizedBox(
             width: double.infinity,
             height: 44,
@@ -739,24 +981,24 @@ class _PassengerCardState extends State<_PassengerCard> {
               ),
             ),
           ),
-
-          // Per-passenger pickup controls — only visible when ride is started
-          if (isRideStarted) ...[
+          if (widget.canUsePickupControls) ...[
             const SizedBox(height: 10),
             if (isPickedUp)
-              // Picked up confirmation badge
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.symmetric(vertical: 10),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF16A34A).withValues(alpha:0.08),
+                  color: const Color(0xFF16A34A).withValues(alpha: 0.08),
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: const Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Icon(Icons.check_circle,
-                        color: Color(0xFF16A34A), size: 18),
+                    Icon(
+                      Icons.check_circle,
+                      color: Color(0xFF16A34A),
+                      size: 18,
+                    ),
                     SizedBox(width: 8),
                     Text(
                       'On Board — Scanned',
@@ -769,10 +1011,9 @@ class _PassengerCardState extends State<_PassengerCard> {
                   ],
                 ),
               )
-            else
+            else ...[
               Row(
                 children: [
-                  // Arrived at pickup button
                   Expanded(
                     child: SizedBox(
                       height: 44,
@@ -795,19 +1036,19 @@ class _PassengerCardState extends State<_PassengerCard> {
                         ),
                         icon: _isMarkingArrived
                             ? const SizedBox(
-                                width: 14,
-                                height: 14,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Color(0xFFD97706),
-                                ),
-                              )
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Color(0xFFD97706),
+                          ),
+                        )
                             : Icon(
-                                driverArrived
-                                    ? Icons.location_on
-                                    : Icons.location_on_outlined,
-                                size: 16,
-                              ),
+                          driverArrived
+                              ? Icons.location_on
+                              : Icons.location_on_outlined,
+                          size: 16,
+                        ),
                         label: Text(
                           driverArrived ? 'Arrived' : 'Mark Arrived',
                           style: const TextStyle(
@@ -818,10 +1059,7 @@ class _PassengerCardState extends State<_PassengerCard> {
                       ),
                     ),
                   ),
-
                   const SizedBox(width: 8),
-
-                  // Scan QR button
                   Expanded(
                     child: SizedBox(
                       height: 44,
@@ -847,12 +1085,49 @@ class _PassengerCardState extends State<_PassengerCard> {
                   ),
                 ],
               ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                height: 44,
+                child: OutlinedButton.icon(
+                  onPressed: canMarkNoShow && !_isMarkingNoShow
+                      ? () => _confirmMarkNoShow(riderName: riderName)
+                      : null,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.redAccent,
+                    side: BorderSide(
+                      color: canMarkNoShow
+                          ? Colors.redAccent
+                          : AppColors.greyText,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  icon: _isMarkingNoShow
+                      ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.redAccent,
+                    ),
+                  )
+                      : const Icon(Icons.person_off_outlined, size: 18),
+                  label: Text(
+                    _isMarkingNoShow ? 'Marking...' : 'Mark No-Show',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
+            ],
           ],
         ],
       ),
     );
   }
 }
+
 // ---------------------------------------------------------------------------
 // TRIP STATUS PANEL
 // ---------------------------------------------------------------------------
@@ -861,7 +1136,10 @@ class _TripStatusPanel extends StatefulWidget {
   final String rideId;
   final Map<String, dynamic> ride;
 
-  const _TripStatusPanel({required this.rideId, required this.ride});
+  const _TripStatusPanel({
+    required this.rideId,
+    required this.ride,
+  });
 
   @override
   State<_TripStatusPanel> createState() => _TripStatusPanelState();
@@ -870,12 +1148,11 @@ class _TripStatusPanel extends StatefulWidget {
 class _TripStatusPanelState extends State<_TripStatusPanel> {
   bool _isLoading = false;
 
-  // 4 visual steps — "All Picked Up" is computed, not a Firestore status
   static const _stepLabels = [
     'Scheduled',
     'Started',
-    'All Picked Up',
-    'Completed'
+    'All Picked\nUp',
+    'Completed',
   ];
 
   static const _stepIcons = [
@@ -885,24 +1162,111 @@ class _TripStatusPanelState extends State<_TripStatusPanel> {
     Icons.check_circle,
   ];
 
-  // Compute pickup progress from the passenger roster
   ({int total, int scanned}) _pickupProgress() {
     final dynamic roster = widget.ride[RideService.fieldPassengerRoster];
-    if (roster is! Map) return (total: 0, scanned: 0);
+
+    if (roster is! Map) {
+      return (total: 0, scanned: 0);
+    }
+
     final rosterMap = Map<String, dynamic>.from(roster);
-    final active = rosterMap.values.where((b) {
-      if (b is! Map) return false;
-      return (b['bookingStatus']?.toString() ??
-              RideService.bookingStatusActive) ==
+
+    final active = rosterMap.values.where((booking) {
+      if (booking is! Map) return false;
+
+      return (booking['bookingStatus']?.toString() ??
+          RideService.bookingStatusActive) ==
           RideService.bookingStatusActive;
     }).toList();
-    final scanned = active
-        .where((b) => (b as Map)[RideService.bookingFieldIsPickedUp] == true)
-        .length;
+
+    final scanned = active.where((booking) {
+      return (booking as Map)[RideService.bookingFieldIsPickedUp] == true;
+    }).length;
+
     return (total: active.length, scanned: scanned);
   }
 
+  bool _isInProgressStatus(String status) {
+    return status == RideService.statusStarted ||
+        status == RideService.statusArrivedAtPickup;
+  }
+
+  bool _isActiveExpiredRide(String status) {
+    return status == RideService.statusActive &&
+        RideService().isRideExpired(widget.ride);
+  }
+
+  Color _statusColor({
+    required String status,
+    required bool isExpired,
+    required bool allScanned,
+  }) {
+    if (status == RideService.statusCancelled) return Colors.redAccent;
+    if (status == RideService.statusCompleted) return const Color(0xFF16A34A);
+    if (isExpired) return Colors.orange;
+
+    if (_isInProgressStatus(status) && allScanned) {
+      return const Color(0xFF16A34A);
+    }
+
+    if (_isInProgressStatus(status)) return const Color(0xFF2563EB);
+
+    return AppColors.navy;
+  }
+
+  String _statusTitle({
+    required String status,
+    required bool isExpired,
+    required bool allScanned,
+  }) {
+    if (status == RideService.statusCancelled) return 'Cancelled';
+    if (status == RideService.statusCompleted) return 'Completed';
+    if (isExpired) return 'Expired';
+    if (_isInProgressStatus(status) && allScanned) return 'All Riders Picked Up';
+    if (_isInProgressStatus(status)) return 'Ride Started';
+
+    return 'Scheduled';
+  }
+
+  String _statusDescription({
+    required String status,
+    required bool isExpired,
+    required int total,
+    required int scanned,
+    required bool allScanned,
+  }) {
+    if (status == RideService.statusCancelled) {
+      return 'This ride has been cancelled. The roster is now read-only.';
+    }
+
+    if (status == RideService.statusCompleted) {
+      return 'This ride is completed. No further changes can be made.';
+    }
+
+    if (isExpired) {
+      return 'This ride expired before it was started. You can remove it from history from My Rides.';
+    }
+
+    if (_isInProgressStatus(status) && allScanned) {
+      return 'All active riders are handled. You can now complete the ride.';
+    }
+
+    if (_isInProgressStatus(status)) {
+      return '$scanned/$total active riders scanned. Scan riders who boarded or mark missing riders as no-show.';
+    }
+
+    return 'This ride is scheduled and ready to start.';
+  }
+
   Future<void> _advanceStatus(String currentStatus) async {
+    final bool isExpired = _isActiveExpiredRide(currentStatus);
+
+    if (isExpired ||
+        currentStatus == RideService.statusCancelled ||
+        currentStatus == RideService.statusCompleted) {
+      return;
+    }
+
     String next;
     String confirmMessage;
     String buttonLabel;
@@ -913,9 +1277,10 @@ class _TripStatusPanelState extends State<_TripStatusPanel> {
       confirmMessage = 'Start the ride?';
       buttonLabel = 'Start Ride';
       buttonColor = const Color(0xFF2563EB);
-    } else if (currentStatus == RideService.statusStarted) {
+    } else if (_isInProgressStatus(currentStatus)) {
       next = RideService.statusCompleted;
-      confirmMessage = 'Mark this ride as completed? This cannot be undone.';
+      confirmMessage =
+      'Mark this ride as completed? Make sure all missing riders are marked no-show first. This cannot be undone.';
       buttonLabel = 'Complete Ride';
       buttonColor = const Color(0xFF16A34A);
     } else {
@@ -930,8 +1295,10 @@ class _TripStatusPanelState extends State<_TripStatusPanel> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel',
-                style: TextStyle(color: AppColors.greyText)),
+            child: const Text(
+              'Cancel',
+              style: TextStyle(color: AppColors.greyText),
+            ),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
@@ -954,49 +1321,209 @@ class _TripStatusPanelState extends State<_TripStatusPanel> {
         rideId: widget.rideId,
         newStatus: next,
       );
+
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Status updated: $buttonLabel'),
-          backgroundColor: Colors.green,
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Status updated: $buttonLabel'),
+            backgroundColor: Colors.green,
+          ),
+        );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.toString().replaceAll('Exception: ', '')),
-          backgroundColor: Colors.redAccent,
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString().replaceAll('Exception: ', '')),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
       }
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
+  }
+
+  Widget _buildAlignedStepper({
+    required int currentStepIndex,
+    required Color activeColor,
+    required bool isCancelled,
+  }) {
+    return Column(
+      children: [
+        SizedBox(
+          height: 42,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              const double circleSize = 34;
+              const double horizontalPadding = circleSize / 2;
+
+              return Stack(
+                alignment: Alignment.center,
+                children: [
+                  Positioned(
+                    left: horizontalPadding,
+                    right: horizontalPadding,
+                    top: 20,
+                    child: Row(
+                      children: List.generate(_stepLabels.length - 1, (index) {
+                        final bool isLineDone =
+                            currentStepIndex > index && !isCancelled;
+
+                        return Expanded(
+                          child: Container(
+                            height: 2,
+                            color: isLineDone
+                                ? activeColor
+                                : const Color(0xFFCBD5E1),
+                          ),
+                        );
+                      }),
+                    ),
+                  ),
+                  Row(
+                    children: List.generate(_stepLabels.length, (index) {
+                      final bool isDone =
+                          currentStepIndex >= index && !isCancelled;
+
+                      return Expanded(
+                        child: Center(
+                          child: Container(
+                            width: circleSize,
+                            height: circleSize,
+                            decoration: BoxDecoration(
+                              color: isDone ? activeColor : Colors.white,
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: isDone
+                                    ? activeColor
+                                    : const Color(0xFFCBD5E1),
+                                width: 2,
+                              ),
+                            ),
+                            child: Icon(
+                              _stepIcons[index],
+                              size: 17,
+                              color: isDone
+                                  ? Colors.white
+                                  : const Color(0xFFCBD5E1),
+                            ),
+                          ),
+                        ),
+                      );
+                    }),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 6),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: List.generate(_stepLabels.length, (index) {
+            final bool isDone = currentStepIndex >= index && !isCancelled;
+
+            return Expanded(
+              child: Text(
+                _stepLabels[index],
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                style: TextStyle(
+                  height: 1.05,
+                  fontSize: 10,
+                  fontWeight: isDone ? FontWeight.bold : FontWeight.w500,
+                  color: isDone ? AppColors.black : AppColors.greyText,
+                ),
+              ),
+            );
+          }),
+        ),
+      ],
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final String status = widget.ride[RideService.fieldStatus]?.toString() ??
-        RideService.statusActive;
+    final String status =
+        widget.ride[RideService.fieldStatus]?.toString() ??
+            RideService.statusActive;
+
+    final progress = _pickupProgress();
 
     final bool isCancelled = status == RideService.statusCancelled;
     final bool isCompleted = status == RideService.statusCompleted;
-    final bool isTerminal = isCompleted || isCancelled;
-    final bool isStarted = status == RideService.statusStarted;
+    final bool isExpired = _isActiveExpiredRide(status);
+    final bool isInProgress = _isInProgressStatus(status);
+    final bool isTerminal = isCompleted || isCancelled || isExpired;
 
-    final progress = _pickupProgress();
     final bool allScanned =
         progress.total == 0 || progress.scanned == progress.total;
 
-    // Visual step index across 4 steps:
-    // 0 = Scheduled, 1 = Started, 2 = All Picked Up, 3 = Completed
     final int currentStepIndex = isCompleted
         ? 3
-        : (isStarted && allScanned)
-            ? 2
-            : isStarted
-                ? 1
-                : isCancelled
-                    ? 0
-                    : 0;
+        : isInProgress && allScanned
+        ? 2
+        : isInProgress
+        ? 1
+        : 0;
+
+    final Color statusColor = _statusColor(
+      status: status,
+      isExpired: isExpired,
+      allScanned: allScanned,
+    );
+
+    final String statusTitle = _statusTitle(
+      status: status,
+      isExpired: isExpired,
+      allScanned: allScanned,
+    );
+
+    final String statusDescription = _statusDescription(
+      status: status,
+      isExpired: isExpired,
+      total: progress.total,
+      scanned: progress.scanned,
+      allScanned: allScanned,
+    );
+
+    final bool canPressMainButton =
+        !_isLoading &&
+            !isTerminal &&
+            !(isInProgress && !allScanned);
+
+    String buttonText;
+    IconData buttonIcon;
+    Color buttonColor;
+
+    if (status == RideService.statusActive && !isExpired) {
+      buttonText = 'Start Ride';
+      buttonIcon = Icons.play_arrow_rounded;
+      buttonColor = const Color(0xFF2563EB);
+    } else if (isInProgress && allScanned) {
+      buttonText = 'Complete Ride';
+      buttonIcon = Icons.check_circle_outline;
+      buttonColor = const Color(0xFF16A34A);
+    } else if (isInProgress && !allScanned) {
+      buttonText = 'Scan or Mark No-Show';
+      buttonIcon = Icons.person_off_outlined;
+      buttonColor = AppColors.greyText;
+    } else if (isExpired) {
+      buttonText = 'Ride Expired';
+      buttonIcon = Icons.timer_off_outlined;
+      buttonColor = Colors.orange;
+    } else if (isCancelled) {
+      buttonText = 'Ride Cancelled';
+      buttonIcon = Icons.cancel_outlined;
+      buttonColor = Colors.redAccent;
+    } else {
+      buttonText = 'Ride Completed';
+      buttonIcon = Icons.check_circle_outline;
+      buttonColor = const Color(0xFF16A34A);
+    }
 
     return Container(
       width: double.infinity,
@@ -1004,6 +1531,9 @@ class _TripStatusPanelState extends State<_TripStatusPanel> {
       decoration: BoxDecoration(
         color: AppColors.bgLight,
         borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: statusColor.withValues(alpha: 0.18),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1016,87 +1546,67 @@ class _TripStatusPanelState extends State<_TripStatusPanel> {
               fontWeight: FontWeight.bold,
             ),
           ),
-          const SizedBox(height: 16),
-
-          // 4-step progress bar
-          Row(
-            children: List.generate(_stepLabels.length, (i) {
-              final bool isDone = currentStepIndex >= i;
-              final bool isLast = i == _stepLabels.length - 1;
-              return Expanded(
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        children: [
-                          Container(
-                            width: 38,
-                            height: 38,
-                            decoration: BoxDecoration(
-                              color: isDone
-                                  ? (isCancelled
-                                      ? Colors.redAccent
-                                      : AppColors.navy)
-                                  : Colors.white,
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color: isDone
-                                    ? (isCancelled
-                                        ? Colors.redAccent
-                                        : AppColors.navy)
-                                    : const Color(0xFFCBD5E1),
-                                width: 2,
-                              ),
-                            ),
-                            child: Icon(
-                              _stepIcons[i],
-                              size: 18,
-                              color: isDone
-                                  ? Colors.white
-                                  : const Color(0xFFCBD5E1),
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            _stepLabels[i],
-                            style: TextStyle(
-                              fontSize: 10,
-                              fontWeight:
-                                  isDone ? FontWeight.bold : FontWeight.normal,
-                              color:
-                                  isDone ? AppColors.black : AppColors.greyText,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                        ],
-                      ),
-                    ),
-                    if (!isLast)
-                      Expanded(
-                        child: Container(
-                          height: 2,
-                          margin: const EdgeInsets.only(bottom: 22),
-                          color: currentStepIndex > i
-                              ? AppColors.navy
-                              : const Color(0xFFCBD5E1),
-                        ),
-                      ),
-                  ],
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: statusColor.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  isExpired
+                      ? Icons.timer_off_outlined
+                      : isCancelled
+                      ? Icons.cancel_outlined
+                      : isCompleted
+                      ? Icons.check_circle_outline
+                      : isInProgress
+                      ? Icons.directions_car
+                      : Icons.schedule,
+                  color: statusColor,
+                  size: 20,
                 ),
-              );
-            }),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    statusTitle,
+                    style: TextStyle(
+                      color: statusColor,
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
-
-          // Pickup progress counter — shown while ride is started
-          if (isStarted && progress.total > 0) ...[
-            const SizedBox(height: 14),
+          const SizedBox(height: 12),
+          Text(
+            statusDescription,
+            style: const TextStyle(
+              color: AppColors.greyText,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 18),
+          _buildAlignedStepper(
+            currentStepIndex: currentStepIndex,
+            activeColor: statusColor,
+            isCancelled: isCancelled,
+          ),
+          if (isInProgress && progress.total > 0) ...[
+            const SizedBox(height: 16),
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
                 color: allScanned
-                    ? const Color(0xFF16A34A).withValues(alpha:0.08)
-                    : const Color(0xFFD97706).withValues(alpha:0.08),
+                    ? const Color(0xFF16A34A).withValues(alpha: 0.08)
+                    : const Color(0xFFD97706).withValues(alpha: 0.08),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Row(
@@ -1109,98 +1619,59 @@ class _TripStatusPanelState extends State<_TripStatusPanel> {
                     size: 18,
                   ),
                   const SizedBox(width: 10),
-                  Text(
-                    allScanned
-                        ? 'All riders scanned — ready to complete'
-                        : '${progress.scanned}/${progress.total} riders scanned',
-                    style: TextStyle(
-                      color: allScanned
-                          ? const Color(0xFF16A34A)
-                          : const Color(0xFFD97706),
-                      fontWeight: FontWeight.bold,
-                      fontSize: 13,
+                  Expanded(
+                    child: Text(
+                      allScanned
+                          ? 'All active riders handled — ready to complete'
+                          : '${progress.scanned}/${progress.total} active riders scanned',
+                      style: TextStyle(
+                        color: allScanned
+                            ? const Color(0xFF16A34A)
+                            : const Color(0xFFD97706),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                      ),
                     ),
                   ),
                 ],
               ),
             ),
           ],
-
-          // Action button
-          if (!isTerminal) ...[
-            const SizedBox(height: 14),
-            SizedBox(
-              width: double.infinity,
-              height: 48,
-              child: ElevatedButton.icon(
-                onPressed: _isLoading
-                    ? null
-                    : (isStarted && !allScanned)
-                        ? null
-                        : () => _advanceStatus(status),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: isStarted
-                      ? (allScanned
-                          ? const Color(0xFF16A34A)
-                          : AppColors.greyText)
-                      : const Color(0xFF2563EB),
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: ElevatedButton.icon(
+              onPressed:
+              canPressMainButton ? () => _advanceStatus(status) : null,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: buttonColor,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: buttonColor.withValues(alpha: 0.55),
+                disabledForegroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
                 ),
-                icon: _isLoading
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                            color: Colors.white, strokeWidth: 2),
-                      )
-                    : Icon(
-                        isStarted
-                            ? Icons.check_circle_outline
-                            : Icons.play_arrow_rounded,
-                        size: 20,
-                      ),
-                label: Text(
-                  _isLoading
-                      ? 'Updating...'
-                      : isStarted
-                          ? (allScanned
-                              ? 'Complete Ride'
-                              : 'Scan All Riders First')
-                          : 'Start Ride',
-                  style: const TextStyle(
-                      fontWeight: FontWeight.bold, fontSize: 15),
+              ),
+              icon: _isLoading
+                  ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                  color: Colors.white,
+                  strokeWidth: 2,
+                ),
+              )
+                  : Icon(buttonIcon, size: 20),
+              label: Text(
+                _isLoading ? 'Updating...' : buttonText,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
                 ),
               ),
             ),
-          ],
-
-          if (isCancelled) ...[
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.redAccent.withValues(alpha:0.08),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Row(
-                children: [
-                  Icon(Icons.cancel_outlined,
-                      color: Colors.redAccent, size: 16),
-                  SizedBox(width: 8),
-                  Text(
-                    'This ride has been cancelled.',
-                    style: TextStyle(
-                        color: Colors.redAccent,
-                        fontSize: 13,
-                        fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
-            ),
-          ],
+          ),
         ],
       ),
     );

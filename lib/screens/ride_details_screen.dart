@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -49,6 +50,12 @@ class _RideDetailsScreenState extends State<RideDetailsScreen> {
     super.initState();
     _loadDriverPhone();
     _loadRiderDefaultLocation();
+  }
+
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    super.dispose();
   }
 
   void _showMessage({
@@ -286,14 +293,16 @@ class _RideDetailsScreenState extends State<RideDetailsScreen> {
 
     if (value is Timestamp) {
       final dateTime = value.toDate();
-      final month = dateTime.month;
-      final day = dateTime.day;
-      final hour = dateTime.hour;
-      final minute = dateTime.minute.toString().padLeft(2, '0');
-      final period = hour >= 12 ? 'PM' : 'AM';
-      final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
 
-      return '$month/$day • $displayHour:$minute $period';
+      final String day = dateTime.day.toString().padLeft(2, '0');
+      final String month = dateTime.month.toString().padLeft(2, '0');
+
+      final int hour = dateTime.hour;
+      final String minute = dateTime.minute.toString().padLeft(2, '0');
+      final String period = hour >= 12 ? 'PM' : 'AM';
+      final int displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+
+      return '$day/$month • $displayHour:$minute $period';
     }
 
     return value.toString();
@@ -549,8 +558,7 @@ class _RideDetailsScreenState extends State<RideDetailsScreen> {
                         ? Image.network(
                       driverImageUrl,
                       fit: BoxFit.cover,
-                      errorBuilder:
-                          (context, error, stackTrace) {
+                      errorBuilder: (context, error, stackTrace) {
                         return const Icon(
                           Icons.person,
                           size: 60,
@@ -623,7 +631,6 @@ class _RideDetailsScreenState extends State<RideDetailsScreen> {
               ),
               child: Row(
                 children: [
-                  // Car icon
                   Container(
                     width: 56,
                     height: 56,
@@ -638,7 +645,6 @@ class _RideDetailsScreenState extends State<RideDetailsScreen> {
                     ),
                   ),
                   const SizedBox(width: 16),
-                  // Car info
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -662,7 +668,9 @@ class _RideDetailsScreenState extends State<RideDetailsScreen> {
                         const SizedBox(height: 2),
                         Container(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 4),
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
                           decoration: BoxDecoration(
                             color: AppColors.gold,
                             borderRadius: BorderRadius.circular(6),
@@ -732,15 +740,16 @@ class _RideDetailsScreenState extends State<RideDetailsScreen> {
                         TileLayer(
                           urlTemplate:
                           'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                          userAgentPackageName:
-                          'com.aastmt.campuspool',
+                          userAgentPackageName: 'com.aastmt.campuspool',
                         ),
                         if (driverPin != null)
                           CircleLayer(
                             circles: [
                               CircleMarker(
                                 point: driverPin,
-                                color: Colors.redAccent.withValues(alpha: 0.2),
+                                color: Colors.redAccent.withValues(
+                                  alpha: 0.2,
+                                ),
                                 borderStrokeWidth: 2,
                                 borderColor: Colors.redAccent,
                                 radius: 80,
@@ -780,29 +789,38 @@ class _RideDetailsScreenState extends State<RideDetailsScreen> {
                       left: 10,
                       right: 10,
                       child: Autocomplete<Map<String, dynamic>>(
-                        optionsBuilder: (TextEditingValue textEditingValue) async {
+                        optionsBuilder:
+                            (TextEditingValue textEditingValue) async {
                           final query = textEditingValue.text.trim();
 
                           if (query.length < 3) {
-                            return const Iterable<Map<String, dynamic>>.empty();
+                            return const Iterable<
+                                Map<String, dynamic>>.empty();
                           }
 
-                          // Cancel the previous timer if the user is still typing
                           if (_debounceTimer?.isActive ?? false) {
                             _debounceTimer!.cancel();
                           }
 
-                          final Completer<Iterable<Map<String, dynamic>>> completer = Completer();
+                          final Completer<
+                              Iterable<Map<String, dynamic>>>
+                          completer = Completer();
 
-                          // Wait 500ms after the user stops typing before calling the API
-                          _debounceTimer = Timer(const Duration(milliseconds: 500), () async {
-                            try {
-                              final results = await _searchLocations(query);
-                              completer.complete(results);
-                            } catch (e) {
-                              completer.complete(const Iterable<Map<String, dynamic>>.empty());
-                            }
-                          });
+                          _debounceTimer = Timer(
+                            const Duration(milliseconds: 500),
+                                () async {
+                              try {
+                                final results =
+                                await _searchLocations(query);
+                                completer.complete(results);
+                              } catch (_) {
+                                completer.complete(
+                                  const Iterable<
+                                      Map<String, dynamic>>.empty(),
+                                );
+                              }
+                            },
+                          );
 
                           return completer.future;
                         },
@@ -840,8 +858,7 @@ class _RideDetailsScreenState extends State<RideDetailsScreen> {
                                 filled: true,
                                 fillColor: Colors.white,
                                 border: OutlineInputBorder(
-                                  borderRadius:
-                                  BorderRadius.circular(8),
+                                  borderRadius: BorderRadius.circular(8),
                                   borderSide: BorderSide.none,
                                 ),
                                 contentPadding:

@@ -428,7 +428,7 @@ class RideService {
   }
 
   // ---------------------------------------------------------------------------
-  // DRIVER REMOVE PASSENGER FROM ROSTER
+  // DRIVER REMOVE PASSENGER BEFORE RIDE STARTS
   // ---------------------------------------------------------------------------
 
   Future<void> removePassengerFromRide({
@@ -460,14 +460,13 @@ class RideService {
 
       final String status = rideData[fieldStatus] ?? statusActive;
 
-      if (status != statusActive && status != statusStarted) {
-        throw Exception('Cannot remove passengers from this ride.');
+      if (status != statusActive) {
+        throw Exception(
+          'Use Mark No-Show after the ride has started.',
+        );
       }
 
-      // Only enforce the time lock before the ride has started
-      if (status == statusActive) {
-        _checkCancellationTimeLock(rideData);
-      }
+      _checkCancellationTimeLock(rideData);
 
       final List<String> passengerIds =
           (rideData[fieldPassengerIds] as List<dynamic>?)
@@ -477,6 +476,95 @@ class RideService {
 
       if (!passengerIds.contains(passengerId)) {
         throw Exception('This rider is not booked on this ride.');
+      }
+
+      final dynamic availableSeatsValue = rideData[fieldAvailableSeats];
+      final int availableSeats = availableSeatsValue is int
+          ? availableSeatsValue
+          : availableSeatsValue is num
+          ? availableSeatsValue.toInt()
+          : 0;
+
+      final dynamic totalSeatsValue = rideData[fieldTotalSeats];
+      final int totalSeats = totalSeatsValue is int
+          ? totalSeatsValue
+          : totalSeatsValue is num
+          ? totalSeatsValue.toInt()
+          : availableSeats + 1;
+
+      final int newAvailableSeats =
+      (availableSeats + 1) > totalSeats ? totalSeats : availableSeats + 1;
+
+      transaction.update(rideRef, {
+        fieldAvailableSeats: newAvailableSeats,
+        fieldPassengerIds: FieldValue.arrayRemove([passengerId]),
+        '$fieldPassengerRoster.$passengerId.bookingStatus':
+        bookingStatusRemoved,
+        '$fieldPassengerRoster.$passengerId.removedAt':
+        FieldValue.serverTimestamp(),
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // DRIVER MARK PASSENGER AS NO-SHOW AFTER RIDE STARTS
+  // ---------------------------------------------------------------------------
+
+  Future<void> markPassengerNoShow({
+    required String rideId,
+    required String passengerId,
+  }) async {
+    final user = _auth.currentUser;
+
+    if (user == null) {
+      throw Exception('No user is currently logged in.');
+    }
+
+    final rideRef = _ridesCollection.doc(rideId);
+
+    await _firestore.runTransaction((transaction) async {
+      final rideSnapshot = await transaction.get(rideRef);
+
+      if (!rideSnapshot.exists || rideSnapshot.data() == null) {
+        throw Exception('Ride was not found.');
+      }
+
+      final rideData = rideSnapshot.data()!;
+
+      final String driverId = rideData[fieldDriverId] ?? '';
+
+      if (driverId != user.uid) {
+        throw Exception('Only the driver can mark no-shows.');
+      }
+
+      final String status = rideData[fieldStatus] ?? statusActive;
+
+      final bool rideIsInProgress =
+          status == statusStarted || status == statusArrivedAtPickup;
+
+      if (!rideIsInProgress) {
+        throw Exception('You can only mark no-shows after the ride starts.');
+      }
+
+      final dynamic roster = rideData[fieldPassengerRoster];
+
+      if (roster is! Map || !roster.containsKey(passengerId)) {
+        throw Exception('This rider is not booked on this ride.');
+      }
+
+      final booking = roster[passengerId];
+
+      if (booking is Map) {
+        final String bookingStatus =
+            booking['bookingStatus']?.toString() ?? bookingStatusActive;
+
+        if (bookingStatus != bookingStatusActive) {
+          throw Exception('This rider is already not active on this ride.');
+        }
+
+        if (booking[bookingFieldIsPickedUp] == true) {
+          throw Exception('This rider has already been scanned.');
+        }
       }
 
       final dynamic availableSeatsValue = rideData[fieldAvailableSeats];
@@ -655,8 +743,14 @@ class RideService {
   // DRIVER TRIP STATUS UPDATES
   // ---------------------------------------------------------------------------
 
-  /// Valid transitions: active → started → completed
+  /// Valid transitions:
+  /// active → started
+  /// started → completed
+  /// arrived_at_pickup → completed
+  ///
   /// Completing requires all active passengers to have isPickedUp == true.
+  /// Passengers marked as removed/no-show are ignored because their
+  /// bookingStatus is no longer active.
   Future<void> updateTripStatus({
     required String rideId,
     required String newStatus,
@@ -694,32 +788,46 @@ class RideService {
 
       final String currentStatus = rideData[fieldStatus] ?? statusActive;
 
-      final Map<String, String> allowedTransitions = {
-        statusActive: statusStarted,
-        statusStarted: statusCompleted,
+      final Map<String, List<String>> allowedTransitions = {
+        statusActive: [statusStarted],
+        statusStarted: [statusCompleted],
+        statusArrivedAtPickup: [statusCompleted],
       };
 
-      if (allowedTransitions[currentStatus] != newStatus) {
+      final List<String> allowedNextStatuses =
+          allowedTransitions[currentStatus] ?? [];
+
+      if (!allowedNextStatuses.contains(newStatus)) {
         throw Exception(
           'Cannot transition from "$currentStatus" to "$newStatus".',
         );
       }
 
-      // Guard: completing requires all active passengers to be scanned
+      if (newStatus == statusStarted && isRideExpired(rideData)) {
+        throw Exception('This ride has already expired and cannot be started.');
+      }
+
       if (newStatus == statusCompleted) {
         final dynamic roster = rideData[fieldPassengerRoster];
+
         if (roster is Map) {
           final rosterMap = Map<String, dynamic>.from(roster);
+
           for (final entry in rosterMap.entries) {
             final booking = entry.value;
+
             if (booking is! Map) continue;
+
             final String bookingStatus =
                 booking['bookingStatus']?.toString() ?? bookingStatusActive;
+
             if (bookingStatus != bookingStatusActive) continue;
+
             final bool isPickedUp = booking[bookingFieldIsPickedUp] == true;
+
             if (!isPickedUp) {
               throw Exception(
-                'All riders must be scanned before completing the ride.',
+                'All active riders must be scanned or marked no-show before completing the ride.',
               );
             }
           }
@@ -734,7 +842,6 @@ class RideService {
   }
 
   // Backward compatibility:
-
   // If any old screen still calls deleteMyRide(), it will cancel the ride instead.
   Future<void> deleteMyRide({
     required String rideId,
@@ -752,19 +859,53 @@ class RideService {
     required String passengerId,
   }) async {
     final user = _auth.currentUser;
-    if (user == null) throw Exception('No user is currently logged in.');
+
+    if (user == null) {
+      throw Exception('No user is currently logged in.');
+    }
 
     final rideRef = _ridesCollection.doc(rideId);
 
     await _firestore.runTransaction((transaction) async {
       final snap = await transaction.get(rideRef);
+
       if (!snap.exists || snap.data() == null) {
         throw Exception('Ride was not found.');
       }
+
       final data = snap.data()!;
+
       if ((data[fieldDriverId] ?? '') != user.uid) {
         throw Exception('Only the driver can mark arrivals.');
       }
+
+      final String status = data[fieldStatus] ?? statusActive;
+
+      if (status != statusStarted && status != statusArrivedAtPickup) {
+        throw Exception('The ride must be started before marking arrivals.');
+      }
+
+      final dynamic roster = data[fieldPassengerRoster];
+
+      if (roster is! Map || !roster.containsKey(passengerId)) {
+        throw Exception('This rider is not booked on this ride.');
+      }
+
+      final booking = roster[passengerId];
+
+      if (booking is Map) {
+        final String bookingStatus =
+            booking['bookingStatus']?.toString() ?? bookingStatusActive;
+
+        if (bookingStatus != bookingStatusActive) {
+          throw Exception('This rider is no longer active on this ride.');
+        }
+
+        if (booking[bookingFieldIsPickedUp] == true) {
+          throw Exception('This rider has already been scanned.');
+        }
+      }
+
       transaction.update(rideRef, {
         '$fieldPassengerRoster.$passengerId.$bookingFieldDriverArrivedAt':
         FieldValue.serverTimestamp(),
@@ -779,15 +920,20 @@ class RideService {
     required String passengerId,
   }) async {
     final user = _auth.currentUser;
-    if (user == null) throw Exception('No user is currently logged in.');
+
+    if (user == null) {
+      throw Exception('No user is currently logged in.');
+    }
 
     final rideRef = _ridesCollection.doc(rideId);
 
     await _firestore.runTransaction((transaction) async {
       final snap = await transaction.get(rideRef);
+
       if (!snap.exists || snap.data() == null) {
         throw Exception('Ride was not found.');
       }
+
       final data = snap.data()!;
 
       if ((data[fieldDriverId] ?? '') != user.uid) {
@@ -795,22 +941,27 @@ class RideService {
       }
 
       final String status = data[fieldStatus] ?? statusActive;
-      if (status != statusStarted) {
+
+      if (status != statusStarted && status != statusArrivedAtPickup) {
         throw Exception('The ride must be started before scanning.');
       }
 
       final dynamic roster = data[fieldPassengerRoster];
+
       if (roster is! Map || !roster.containsKey(passengerId)) {
         throw Exception('This rider is not booked on this ride.');
       }
 
       final booking = roster[passengerId];
+
       if (booking is Map) {
         final String bookingStatus =
             booking['bookingStatus']?.toString() ?? bookingStatusActive;
+
         if (bookingStatus != bookingStatusActive) {
           throw Exception('This rider\'s booking is no longer active.');
         }
+
         if (booking[bookingFieldIsPickedUp] == true) {
           throw Exception('This rider has already been scanned.');
         }
@@ -825,20 +976,30 @@ class RideService {
   }
 
   /// Returns true if all active passengers on the ride have been scanned.
+  /// Removed/no-show/cancelled riders are ignored.
   bool allPassengersScanned(Map<String, dynamic> rideData) {
     final dynamic roster = rideData[fieldPassengerRoster];
-    if (roster is! Map) return true; // no passengers = can complete
+
+    if (roster is! Map) {
+      return true;
+    }
 
     final rosterMap = Map<String, dynamic>.from(roster);
-    final activeBookings = rosterMap.values.where((b) {
-      if (b is! Map) return false;
-      return (b['bookingStatus']?.toString() ?? bookingStatusActive) ==
+
+    final activeBookings = rosterMap.values.where((booking) {
+      if (booking is! Map) return false;
+
+      return (booking['bookingStatus']?.toString() ?? bookingStatusActive) ==
           bookingStatusActive;
     });
 
-    if (activeBookings.isEmpty) return true;
+    if (activeBookings.isEmpty) {
+      return true;
+    }
 
-    return activeBookings.every((b) => (b as Map)[bookingFieldIsPickedUp] == true);
+    return activeBookings.every(
+          (booking) => (booking as Map)[bookingFieldIsPickedUp] == true,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -876,38 +1037,41 @@ class RideService {
     }
 
     final user = _auth.currentUser;
-    if (user == null) throw Exception('No user is currently logged in.');
+
+    if (user == null) {
+      throw Exception('No user is currently logged in.');
+    }
 
     final rideRef = _ridesCollection.doc(rideId);
     final driverRef = _usersCollection.doc(driverUid);
 
     await _firestore.runTransaction((transaction) async {
       final rideSnap = await transaction.get(rideRef);
+
       if (!rideSnap.exists || rideSnap.data() == null) {
         throw Exception('Ride was not found.');
       }
 
       final rideData = rideSnap.data()!;
 
-      // Make sure the ride is completed
       final String status = rideData[fieldStatus] ?? statusActive;
+
       if (status != statusCompleted) {
         throw Exception('You can only rate a completed ride.');
       }
 
-      // Make sure this rider was actually on the ride
       final dynamic roster = rideData[fieldPassengerRoster];
+
       if (roster is! Map || !roster.containsKey(user.uid)) {
         throw Exception('You were not on this ride.');
       }
 
-      // Prevent double-rating
       final booking = roster[user.uid];
+
       if (booking is Map && booking['hasRated'] == true) {
         throw Exception('You have already rated this driver.');
       }
 
-      // Atomically update the driver's rating fields
       final driverSnap = await transaction.get(driverRef);
       final driverData = driverSnap.exists ? driverSnap.data() ?? {} : {};
 
@@ -919,7 +1083,6 @@ class RideService {
         'ratingCount': currentCount + 1,
       });
 
-      // Mark this booking as rated
       transaction.update(rideRef, {
         '$fieldPassengerRoster.${user.uid}.hasRated': true,
         '$fieldPassengerRoster.${user.uid}.ratedAt':
@@ -931,21 +1094,29 @@ class RideService {
   /// Returns true if the current user has already rated this ride.
   bool hasAlreadyRated(Map<String, dynamic> rideData, String uid) {
     final dynamic roster = rideData[fieldPassengerRoster];
-    if (roster is! Map || !roster.containsKey(uid)) return false;
+
+    if (roster is! Map || !roster.containsKey(uid)) {
+      return false;
+    }
+
     final booking = roster[uid];
+
     return booking is Map && booking['hasRated'] == true;
   }
 
   // ---------------------------------------------------------------------------
-  // ACTIVE RIDES STREAM FOR HOME FEED (UPDATED WITH LIMIT/PAGINATION)
+  // ACTIVE RIDES STREAM FOR HOME FEED
   // ---------------------------------------------------------------------------
 
   Stream<QuerySnapshot<Map<String, dynamic>>> streamActiveRides({
     String? originFilter,
     String? destinationFilter,
-    int limit = 10, // Kept so home_screen.dart doesn't throw an error
+    int limit = 10,
   }) {
-    Query<Map<String, dynamic>> query = _ridesCollection.where(fieldStatus, isEqualTo: statusActive);
+    Query<Map<String, dynamic>> query = _ridesCollection.where(
+      fieldStatus,
+      isEqualTo: statusActive,
+    );
 
     if (originFilter != null && originFilter.isNotEmpty) {
       query = query.where(fieldOriginName, isEqualTo: originFilter);
@@ -955,8 +1126,6 @@ class RideService {
       query = query.where(fieldDestinationName, isEqualTo: destinationFilter);
     }
 
-    // OLD LOGIC: Returns everything without limits or ordering.
-    // No composite index required, and no missing rides!
     return query.snapshots();
   }
 

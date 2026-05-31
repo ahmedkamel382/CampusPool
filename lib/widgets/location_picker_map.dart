@@ -22,8 +22,8 @@ class LocationPickerMap extends StatefulWidget {
     required this.initialLocation,
     required this.currentNeighborhood,
     this.darkTheme = true,
-    this.driverLocation,      // ← ADD
-    this.showDriverPin = false, // ← ADD
+    this.driverLocation,
+    this.showDriverPin = false,
     required this.onLocationSelected,
     required this.onNeighborhoodChanged,
   });
@@ -37,7 +37,6 @@ class _LocationPickerMapState extends State<LocationPickerMap> {
   final MapController _mapController = MapController();
   final TextEditingController _searchController = TextEditingController();
 
-  // NEW: The "Memory" variables
   late final LatLng _originalSavedLocation;
   late final String _originalNeighborhood;
 
@@ -175,7 +174,7 @@ class _LocationPickerMapState extends State<LocationPickerMap> {
       return;
     }
 
-    // 2. Use your new Debouncer class!
+    // 2. Use Debouncer class
     _debouncer.run(() async {
       setState(() => _isSearching = true);
 

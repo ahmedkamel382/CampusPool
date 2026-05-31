@@ -227,7 +227,7 @@ class _RatingDialogState extends State<RatingDialog> {
               ? null
               : () => Navigator.pop(context, false),
           child: const Text(
-            'Skip for now',
+            'Skip',
             style: TextStyle(color: AppColors.greyText, fontSize: 13),
           ),
         ),
