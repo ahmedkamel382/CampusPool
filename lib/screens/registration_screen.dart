@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image_cropper/image_cropper.dart';
@@ -120,7 +121,6 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       return;
     }
 
-    // ← PASTE HERE
     if (hasCar) {
       if (_carMakeController.text.trim().isEmpty ||
           _carModelController.text.trim().isEmpty ||
@@ -145,35 +145,68 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     setState(() => isLoading = true);
 
     try {
+      // --- NEW DUPLICATION CHECKS ---
+      // 1. Check if Student ID is already taken
+      final idCheck = await FirebaseFirestore.instance
+          .collection('users')
+          .where('studentId', isEqualTo: _idController.text.trim())
+          .get();
+
+      if (idCheck.docs.isNotEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('This Student ID is already registered.')));
+          setState(() => isLoading = false);
+        }
+        return;
+      }
+
+      // 2. Check if Email is already taken
+      final emailCheck = await FirebaseFirestore.instance
+          .collection('users')
+          .where('email', isEqualTo: _emailController.text.trim())
+          .get();
+
+      if (emailCheck.docs.isNotEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('This University Email is already registered.')));
+          setState(() => isLoading = false);
+        }
+        return;
+      }
+
       String formattedPhone = _phoneController.text.trim();
       if (formattedPhone.startsWith('0')) {
         formattedPhone = formattedPhone.substring(1);
       }
 
       if (formattedPhone.length != 10) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Invalid phone number. Please enter a valid 11-digit Egyptian mobile number.'))
-        );
-        setState(() => isLoading = false);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Invalid phone number. Please enter a valid 11-digit Egyptian mobile number.'))
+          );
+          setState(() => isLoading = false);
+        }
         return;
       }
 
       String finalDatabasePhone = '+20$formattedPhone';
 
       await AuthService().registerUser(
-        email: _emailController.text,
-        password: _passwordController.text,
-        fullName: _nameController.text,
-        studentId: _idController.text,
+        email: _emailController.text.trim(), // Added .trim() for safety
+        password: _passwordController.text.trim(),
+        fullName: _nameController.text.trim(),
+        studentId: _idController.text.trim(),
         phone: finalDatabasePhone,
         gender: selectedGender!,
         defaultNeighborhood: selectedNeighborhood!,
         homeLocation: _homeCoordinates,
         hasCar: hasCar,
-        carMake: _carMakeController.text,
-        carModel: _carModelController.text,
-        carColor: _carColorController.text,
-        carPlate: _carPlateController.text,
+        carMake: _carMakeController.text.trim(),
+        carModel: _carModelController.text.trim(),
+        carColor: _carColorController.text.trim(),
+        carPlate: _carPlateController.text.trim(),
         profileImage: _profileImage,
       );
 
